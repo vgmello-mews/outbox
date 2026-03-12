@@ -11,6 +11,7 @@ services:
       test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',1433), timeout=2); s.close()\""]
       interval: 5s
       timeout: 5s
+      start_period: 15s
       retries: 20
     networks:
       - outbox-net

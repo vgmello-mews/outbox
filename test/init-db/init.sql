@@ -95,7 +95,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Outbox_LeaseExpiry')
     WHERE LeasedUntilUtc IS NOT NULL;
 GO
 
--- Seed 8 work-distribution buckets (independent of Redpanda topic partition count)
+-- Seed 8 logical work-distribution buckets. These are NOT Kafka/Redpanda partitions —
+-- they control how OutboxPublisher instances split work via CHECKSUM(PartitionKey) % N.
+-- Adjust the count based on expected max publisher concurrency (more buckets = finer distribution).
 DECLARE @i INT = 0;
 WHILE @i < 8
 BEGIN

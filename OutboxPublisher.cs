@@ -61,7 +61,6 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private int _totalPartitionCount = 0;
 
     // Adaptive backoff state for the publish loop.
-    private volatile int _consecutiveEmptyPolls = 0;
     private volatile int _currentPollIntervalMs;
 
     // Last known publish error, for dead-letter diagnostics.
@@ -198,17 +197,15 @@ public sealed class OutboxPublisher : IAsyncDisposable
                 if (batch.Count == 0)
                 {
                     // Adaptive backoff on empty poll.
-                    _consecutiveEmptyPolls++;
                     _currentPollIntervalMs = Math.Min(
                         _currentPollIntervalMs * 2,
                         _options.MaxPollIntervalMs);
 
-                    await DelayAsync(_currentPollIntervalMs, ct).ConfigureAwait(false);
+                    await Task.Delay(_currentPollIntervalMs, ct).ConfigureAwait(false);
                     continue;
                 }
 
                 // Non-empty poll: reset backoff.
-                _consecutiveEmptyPolls = 0;
                 _currentPollIntervalMs = _options.MinPollIntervalMs;
 
                 // Inline dead-letter: rows whose RetryCount reached MaxRetryCount
@@ -243,7 +240,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
             {
                 // Log and continue — individual batch failures must not crash the loop.
                 OnError("PublishLoop", ex);
-                await DelayAsync(_options.MinPollIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(_options.MinPollIntervalMs, ct).ConfigureAwait(false);
             }
         }
     }
@@ -258,7 +255,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
         {
             try
             {
-                await DelayAsync(_options.HeartbeatIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(_options.HeartbeatIntervalMs, ct).ConfigureAwait(false);
                 await RefreshHeartbeatAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -282,7 +279,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
         {
             try
             {
-                await DelayAsync(_options.RebalanceIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(_options.RebalanceIntervalMs, ct).ConfigureAwait(false);
                 await RebalanceAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -306,7 +303,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
         {
             try
             {
-                await DelayAsync(_options.OrphanSweepIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(_options.OrphanSweepIntervalMs, ct).ConfigureAwait(false);
                 await ClaimOrphanPartitionsAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -373,7 +370,7 @@ END;";
         {
             try
             {
-                await DelayAsync(_options.DeadLetterSweepIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(_options.DeadLetterSweepIntervalMs, ct).ConfigureAwait(false);
                 await SweepDeadLettersAsync(lastError: _lastPublishError, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -602,16 +599,27 @@ FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
 WHERE o.RetryCount >= @MaxRetryCount
   AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());";
 
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-        cmd.Parameters.AddWithValue("@MaxRetryCount", _options.MaxRetryCount);
-        cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
-            (object?)lastError ?? DBNull.Value;
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+                cmd.Parameters.AddWithValue("@MaxRetryCount", _options.MaxRetryCount);
+                cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
+                    (object?)lastError ?? DBNull.Value;
 
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < 3)
+            {
+                await Task.Delay(50 * attempt, ct).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>
@@ -636,17 +644,28 @@ FROM dbo.Outbox o
 WHERE o.SequenceNumber = @SequenceNumber
   AND o.LeaseOwner = @PublisherId;";
 
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-        cmd.Parameters.AddWithValue("@SequenceNumber", row.SequenceNumber);
-        cmd.Parameters.AddWithValue("@PublisherId", _producerId);
-        cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
-            (object?)reason ?? DBNull.Value;
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+                cmd.Parameters.AddWithValue("@SequenceNumber", row.SequenceNumber);
+                cmd.Parameters.AddWithValue("@PublisherId", _producerId);
+                cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
+                    (object?)reason ?? DBNull.Value;
 
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < 3)
+            {
+                await Task.Delay(50 * attempt, ct).ConfigureAwait(false);
+            }
+        }
     }
 
     private async Task RegisterProducerAsync(CancellationToken ct)
@@ -1126,19 +1145,6 @@ COMMIT TRANSACTION;";
             or 40197           // Azure SQL service error
             or 40501           // Azure SQL service busy
             or 49918 or 49919 or 49920; // Azure SQL transient errors
-
-    private static async Task DelayAsync(int milliseconds, CancellationToken ct)
-    {
-        try
-        {
-            await Task.Delay(milliseconds, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Propagate cancellation so the calling loop exits promptly.
-            throw;
-        }
-    }
 
     private void OnError(string context, Exception? exception)
     {

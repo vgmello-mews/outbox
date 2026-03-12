@@ -28,7 +28,6 @@ Console.WriteLine($"[OutboxPublisher] Starting — bootstrap={bootstrapServers},
 // Wait for DB to be reachable
 Console.WriteLine("[OutboxPublisher] Waiting for database...");
 await using var initConn = await DbHelpers.OpenConnectionAsync(connectionString, cts.Token);
-await initConn.CloseAsync();
 Console.WriteLine("[OutboxPublisher] Database is reachable.");
 
 await using var publisher = new KafkaOutboxPublisher(connectionString, bootstrapServers, options);

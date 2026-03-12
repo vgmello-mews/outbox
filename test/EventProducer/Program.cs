@@ -22,7 +22,6 @@ Console.WriteLine($"[EventProducer] Starting — topic={topicName}, batch={batch
 // Wait for DB to be reachable
 Console.WriteLine("[EventProducer] Waiting for database...");
 await using var initConn = await DbHelpers.OpenConnectionAsync(connectionString, cts.Token);
-await initConn.CloseAsync();
 Console.WriteLine("[EventProducer] Database is reachable.");
 
 var random = new Random();
