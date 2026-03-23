@@ -51,11 +51,11 @@ The publisher doesn't receive push notifications. It **polls** the database on a
 
 ### Adaptive polling
 
-| Condition | Behavior |
-|---|---|
-| Empty batch | Double the poll interval (up to `MaxPollIntervalMs`) |
-| Messages found and published | Reset to `MinPollIntervalMs` |
-| Messages found, nothing published (circuits open) | Double the poll interval |
+| Condition                                         | Behavior                                             |
+| ------------------------------------------------- | ---------------------------------------------------- |
+| Empty batch                                       | Double the poll interval (up to `MaxPollIntervalMs`) |
+| Messages found and published                      | Reset to `MinPollIntervalMs`                         |
+| Messages found, nothing published (circuits open) | Double the poll interval                             |
 
 This prevents hot loops during idle periods and ensures fast draining when messages are flowing.
 
@@ -106,6 +106,7 @@ Three background loops manage partition assignment:
 **Heartbeat loop** (every 10s) — Updates `last_heartbeat_utc` for this publisher and cancels any pending grace period on its partitions. This signals "I'm still alive."
 
 **Rebalance loop** (every 30s) — Computes a fair share (`ceil(total_partitions / active_producers)`) and:
+
 1. Marks stale producers' partitions with a grace period
 2. Claims unowned or grace-expired partitions up to the fair share
 3. Releases excess partitions if over the fair share
@@ -124,11 +125,11 @@ Each topic has its own circuit breaker that prevents retry-count burn during bro
 
 ### States
 
-| State | Behavior |
-|---|---|
-| **Closed** | Normal operation. Failures are counted. |
-| **Open** | Messages are released *without* incrementing `retry_count`. No sends attempted. |
-| **HalfOpen** | Timer expired. One probe batch is allowed through. |
+| State        | Behavior                                                                        |
+| ------------ | ------------------------------------------------------------------------------- |
+| **Closed**   | Normal operation. Failures are counted.                                         |
+| **Open**     | Messages are released _without_ incrementing `retry_count`. No sends attempted. |
+| **HalfOpen** | Timer expired. One probe batch is allowed through.                              |
 
 ### Transitions
 
@@ -154,14 +155,14 @@ Dead-lettered messages can be replayed via `IDeadLetterManager.ReplayAsync`, whi
 
 The publisher exposes an ASP.NET Core health check under the name `"outbox"`.
 
-| State | Condition |
-|---|---|
-| **Unhealthy** | Publish loop not running |
+| State         | Condition                                 |
+| ------------- | ----------------------------------------- |
+| **Unhealthy** | Publish loop not running                  |
 | **Unhealthy** | Heartbeat stale (> 3× heartbeat interval) |
-| **Unhealthy** | No polls (> 3× max poll interval) |
-| **Degraded** | Circuit breaker open for any topic |
-| **Degraded** | Loops have restarted |
-| **Healthy** | All checks pass |
+| **Unhealthy** | No polls (> 3× max poll interval)         |
+| **Degraded**  | Circuit breaker open for any topic        |
+| **Degraded**  | Loops have restarted                      |
+| **Healthy**   | All checks pass                           |
 
 The health check reflects the publisher's internal state only. Database and broker connectivity are left to infrastructure health checks.
 
@@ -178,16 +179,16 @@ All five loops run inside a shared cancellation scope. If any loop exits (crash 
 
 ### Metrics (meter: `"Outbox"`)
 
-| Metric | Type | Description |
-|---|---|---|
-| `outbox.messages.published` | Counter | Messages successfully sent |
-| `outbox.messages.dead_lettered` | Counter | Messages moved to dead letter |
-| `outbox.messages.pending` | Gauge | Current pending count |
-| `outbox.publish.failures` | Counter | Failed publish attempts |
-| `outbox.circuit_breaker.state_changes` | Counter | Circuit state transitions |
-| `outbox.publish.duration` | Histogram (ms) | Transport send duration |
-| `outbox.poll.duration` | Histogram (ms) | Database lease duration |
-| `outbox.poll.batch_size` | Histogram | Messages per batch |
+| Metric                                 | Type           | Description                   |
+| -------------------------------------- | -------------- | ----------------------------- |
+| `outbox.messages.published`            | Counter        | Messages successfully sent    |
+| `outbox.messages.dead_lettered`        | Counter        | Messages moved to dead letter |
+| `outbox.messages.pending`              | Gauge          | Current pending count         |
+| `outbox.publish.failures`              | Counter        | Failed publish attempts       |
+| `outbox.circuit_breaker.state_changes` | Counter        | Circuit state transitions     |
+| `outbox.publish.duration`              | Histogram (ms) | Transport send duration       |
+| `outbox.poll.duration`                 | Histogram (ms) | Database lease duration       |
+| `outbox.poll.batch_size`               | Histogram      | Messages per batch            |
 
 ### Distributed tracing
 
@@ -197,15 +198,15 @@ An `ActivitySource` named `"Outbox"` creates one activity per `(topic, partition
 
 Implement `IOutboxEventHandler` to receive lifecycle notifications:
 
-| Callback | When |
-|---|---|
-| `OnMessagePublishedAsync` | After successful send, before delete |
-| `OnPublishFailedAsync` | After transport failure, after lease release |
-| `OnMessageDeadLetteredAsync` | After a message is dead-lettered |
-| `OnCircuitBreakerStateChangedAsync` | After any circuit state change |
-| `OnRebalanceAsync` | After partition rebalance |
+| Callback                            | When                                         |
+| ----------------------------------- | -------------------------------------------- |
+| `OnMessagePublishedAsync`           | After successful send, before delete         |
+| `OnPublishFailedAsync`              | After transport failure, after lease release |
+| `OnMessageDeadLetteredAsync`        | After a message is dead-lettered             |
+| `OnCircuitBreakerStateChangedAsync` | After any circuit state change               |
+| `OnRebalanceAsync`                  | After partition rebalance                    |
 
-All callbacks are individually try/caught—exceptions never affect message fate. Health state is always updated *before* the callback fires.
+All callbacks are individually try/caught—exceptions never affect message fate. Health state is always updated _before_ the callback fires.
 
 ## Message interceptors
 
@@ -220,21 +221,21 @@ Both use lazy context allocation—zero overhead when no interceptor matches a m
 
 All publisher options are in the `"Outbox:Publisher"` configuration section and support hot-reload via `IOptionsMonitor`.
 
-| Option | Default | Description |
-|---|---|---|
-| `BatchSize` | 100 | Messages per poll |
-| `LeaseDurationSeconds` | 45 | Lock duration per message |
-| `MaxRetryCount` | 5 | Retries before dead-lettering |
-| `MinPollIntervalMs` | 100 | Fastest poll rate |
-| `MaxPollIntervalMs` | 5000 | Slowest poll rate |
-| `HeartbeatIntervalMs` | 10000 | Heartbeat frequency |
-| `HeartbeatTimeoutSeconds` | 30 | Staleness threshold |
-| `PartitionGracePeriodSeconds` | 60 | Grace period before partition takeover |
-| `RebalanceIntervalMs` | 30000 | Rebalance frequency |
-| `OrphanSweepIntervalMs` | 60000 | Orphan sweep frequency |
-| `DeadLetterSweepIntervalMs` | 60000 | Dead-letter sweep frequency |
-| `CircuitBreakerFailureThreshold` | 3 | Failures before circuit opens |
-| `CircuitBreakerOpenDurationSeconds` | 30 | Open duration before half-open probe |
+| Option                              | Default | Description                            |
+| ----------------------------------- | ------- | -------------------------------------- |
+| `BatchSize`                         | 100     | Messages per poll                      |
+| `LeaseDurationSeconds`              | 45      | Lock duration per message              |
+| `MaxRetryCount`                     | 5       | Retries before dead-lettering          |
+| `MinPollIntervalMs`                 | 100     | Fastest poll rate                      |
+| `MaxPollIntervalMs`                 | 5000    | Slowest poll rate                      |
+| `HeartbeatIntervalMs`               | 10000   | Heartbeat frequency                    |
+| `HeartbeatTimeoutSeconds`           | 30      | Staleness threshold                    |
+| `PartitionGracePeriodSeconds`       | 60      | Grace period before partition takeover |
+| `RebalanceIntervalMs`               | 30000   | Rebalance frequency                    |
+| `OrphanSweepIntervalMs`             | 60000   | Orphan sweep frequency                 |
+| `DeadLetterSweepIntervalMs`         | 60000   | Dead-letter sweep frequency            |
+| `CircuitBreakerFailureThreshold`    | 3       | Failures before circuit opens          |
+| `CircuitBreakerOpenDurationSeconds` | 30      | Open duration before half-open probe   |
 
 ### Validation rules
 
