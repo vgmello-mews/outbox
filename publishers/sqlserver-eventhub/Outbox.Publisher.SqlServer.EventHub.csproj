@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Outbox.Core/Outbox.Core.csproj" />
+    <ProjectReference Include="../../src/Outbox.SqlServer/Outbox.SqlServer.csproj" />
+    <ProjectReference Include="../../src/Outbox.EventHub/Outbox.EventHub.csproj" />
+  </ItemGroup>
+</Project>

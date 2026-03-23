@@ -1,0 +1,68 @@
+name: outbox-publisher-sqlserver-kafka
+
+networks:
+  outbox-net:
+    driver: bridge
+
+services:
+  azuresqledge:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: ${ACCEPT_EULA}
+      SA_PASSWORD: ${SA_PASSWORD}
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket; s=socket.socket(); s.connect(('localhost',1433)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [outbox-net]
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --mode dev-container
+      - --smp 1
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:9644/v1/node_config"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [outbox-net]
+
+  dbinit:
+    build:
+      context: ../..
+      dockerfile: tools/dbinit/Dockerfile
+    environment:
+      SQLSERVER_CONN: "Server=azuresqledge,1433;Database=outbox;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      REDPANDA_BROKERS: "redpanda:9092"
+    depends_on:
+      azuresqledge:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks: [outbox-net]
+
+  publisher:
+    build:
+      context: ../..
+      dockerfile: publishers/sqlserver-kafka/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=outbox;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      Outbox__Kafka__BootstrapServers: "redpanda:9092"
+    restart: unless-stopped
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+    networks: [outbox-net]

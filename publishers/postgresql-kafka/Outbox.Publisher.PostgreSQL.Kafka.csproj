@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Outbox.Core/Outbox.Core.csproj" />
+    <ProjectReference Include="../../src/Outbox.PostgreSQL/Outbox.PostgreSQL.csproj" />
+    <ProjectReference Include="../../src/Outbox.Kafka/Outbox.Kafka.csproj" />
+  </ItemGroup>
+</Project>

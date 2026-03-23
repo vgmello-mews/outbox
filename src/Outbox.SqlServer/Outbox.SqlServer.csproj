@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Outbox.SqlServer</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Outbox.Store.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Outbox.Core/Outbox.Core.csproj" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="db_scripts/**" Pack="true" PackagePath="db_scripts" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,192 @@
+-- =============================================================================
+-- Outbox SQL Server Schema — install script
+-- Run once at deployment time. All statements are idempotent (IF NOT EXISTS).
+-- =============================================================================
+
+-- =============================================================================
+-- SECTION 1: TABLES
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 1a. Outbox — primary event buffer
+-- ---------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND type = N'U')
+BEGIN
+    CREATE TABLE dbo.Outbox
+    (
+        SequenceNumber   BIGINT IDENTITY(1,1)  NOT NULL,
+        TopicName        NVARCHAR(256)         NOT NULL,
+        PartitionKey     NVARCHAR(256)         NOT NULL,
+        EventType        NVARCHAR(256)         NOT NULL,
+        Headers          NVARCHAR(MAX)         NULL,
+        Payload          VARBINARY(MAX)        NOT NULL,
+        CreatedAtUtc     DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
+        EventDateTimeUtc DATETIME2(3)          NOT NULL,
+        EventOrdinal     SMALLINT              NOT NULL  DEFAULT 0,
+        PayloadContentType NVARCHAR(100)       NOT NULL  DEFAULT 'application/json',
+        LeasedUntilUtc   DATETIME2(3)          NULL,
+        LeaseOwner       NVARCHAR(128)         NULL,
+        RetryCount       INT                   NOT NULL  DEFAULT 0,
+
+        CONSTRAINT PK_Outbox PRIMARY KEY CLUSTERED (SequenceNumber)
+    );
+END;
+GO
+
+-- ---------------------------------------------------------------------------
+-- 1b. OutboxDeadLetter — rows that exceeded the retry threshold
+-- ---------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.OutboxDeadLetter') AND type = N'U')
+BEGIN
+    CREATE TABLE dbo.OutboxDeadLetter
+    (
+        DeadLetterSeq     BIGINT IDENTITY(1,1)  NOT NULL,
+        SequenceNumber    BIGINT                NOT NULL,
+        TopicName         NVARCHAR(256)         NOT NULL,
+        PartitionKey      NVARCHAR(256)         NOT NULL,
+        EventType         NVARCHAR(256)         NOT NULL,
+        Headers           NVARCHAR(MAX)         NULL,
+        Payload           VARBINARY(MAX)        NOT NULL,
+        CreatedAtUtc      DATETIME2(3)          NOT NULL,
+        RetryCount        INT                   NOT NULL,
+        EventDateTimeUtc  DATETIME2(3)          NOT NULL,
+        EventOrdinal      SMALLINT              NOT NULL  DEFAULT 0,
+        PayloadContentType NVARCHAR(100)        NOT NULL  DEFAULT 'application/json',
+        DeadLetteredAtUtc DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
+        LastError         NVARCHAR(2000)        NULL,
+
+        CONSTRAINT PK_OutboxDeadLetter PRIMARY KEY CLUSTERED (DeadLetterSeq)
+    );
+END;
+GO
+
+-- ---------------------------------------------------------------------------
+-- 1c. OutboxProducers — heartbeat registry for active publisher instances
+-- ---------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.OutboxProducers') AND type = N'U')
+BEGIN
+    CREATE TABLE dbo.OutboxProducers
+    (
+        ProducerId        NVARCHAR(128)  NOT NULL,
+        RegisteredAtUtc   DATETIME2(3)   NOT NULL  DEFAULT SYSUTCDATETIME(),
+        LastHeartbeatUtc  DATETIME2(3)   NOT NULL  DEFAULT SYSUTCDATETIME(),
+        HostName          NVARCHAR(256)  NULL,
+
+        CONSTRAINT PK_OutboxProducers PRIMARY KEY CLUSTERED (ProducerId)
+    );
+END;
+GO
+
+-- ---------------------------------------------------------------------------
+-- 1d. OutboxPartitions — partition affinity assignment map
+-- ---------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.OutboxPartitions') AND type = N'U')
+BEGIN
+    CREATE TABLE dbo.OutboxPartitions
+    (
+        PartitionId        INT            NOT NULL,
+        OwnerProducerId    NVARCHAR(128)  NULL,
+        OwnedSinceUtc      DATETIME2(3)   NULL,
+        GraceExpiresUtc    DATETIME2(3)   NULL,
+
+        CONSTRAINT PK_OutboxPartitions PRIMARY KEY CLUSTERED (PartitionId)
+    );
+END;
+GO
+
+-- =============================================================================
+-- SECTION 2: TABLE-VALUED PARAMETER TYPE
+-- =============================================================================
+
+IF NOT EXISTS (SELECT 1 FROM sys.types WHERE name = N'SequenceNumberList' AND schema_id = SCHEMA_ID(N'dbo'))
+BEGIN
+    CREATE TYPE dbo.SequenceNumberList AS TABLE
+    (
+        SequenceNumber BIGINT NOT NULL PRIMARY KEY
+    );
+END;
+GO
+
+-- =============================================================================
+-- SECTION 3: INDEXES
+-- =============================================================================
+
+-- Unified poll (fresh rows arm): unleased rows in causal order
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Unleased')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
+    ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
+    WHERE LeasedUntilUtc IS NULL;
+END;
+GO
+
+-- Unified poll (expired rows arm): expired-lease rows
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_LeaseExpiry')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
+    ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
+    WHERE LeasedUntilUtc IS NOT NULL;
+END;
+GO
+
+-- Sweep candidates: retry count with lease info
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Sweep')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_Outbox_Sweep
+    ON dbo.Outbox (RetryCount, LeaseOwner)
+    INCLUDE (SequenceNumber, LeasedUntilUtc);
+END;
+GO
+
+-- Dead-letter lookup by original sequence number (used by replay and purge)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxDeadLetter') AND name = N'IX_OutboxDeadLetter_SequenceNumber')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_OutboxDeadLetter_SequenceNumber
+    ON dbo.OutboxDeadLetter (SequenceNumber);
+END;
+GO
+
+-- =============================================================================
+-- SECTION 4: DIAGNOSTIC VIEWS
+-- =============================================================================
+
+CREATE OR ALTER VIEW dbo.vw_Outbox AS
+SELECT SequenceNumber, TopicName, PartitionKey, EventType,
+       PayloadContentType,
+       Headers AS HeadersText,
+       CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
+            THEN CAST(Payload AS VARCHAR(MAX))
+       END AS PayloadText,
+       RetryCount, CreatedAtUtc, EventDateTimeUtc
+FROM dbo.Outbox;
+GO
+
+CREATE OR ALTER VIEW dbo.vw_OutboxDeadLetter AS
+SELECT DeadLetterSeq, SequenceNumber, TopicName, PartitionKey, EventType,
+       PayloadContentType,
+       Headers AS HeadersText,
+       CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
+            THEN CAST(Payload AS VARCHAR(MAX))
+       END AS PayloadText,
+       RetryCount, CreatedAtUtc, EventDateTimeUtc,
+       DeadLetteredAtUtc, LastError
+FROM dbo.OutboxDeadLetter;
+GO
+
+-- =============================================================================
+-- SECTION 5: SEED DEFAULT PARTITIONS (32 partitions)
+-- =============================================================================
+
+DECLARE @i INT = 0;
+WHILE @i < 32
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM dbo.OutboxPartitions WHERE PartitionId = @i)
+    BEGIN
+        INSERT INTO dbo.OutboxPartitions (PartitionId, OwnerProducerId, OwnedSinceUtc, GraceExpiresUtc)
+        VALUES (@i, NULL, NULL, NULL);
+    END;
+    SET @i = @i + 1;
+END;
+GO

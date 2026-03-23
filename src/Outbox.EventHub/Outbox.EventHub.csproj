@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Outbox.EventHub</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Outbox.EventHub.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Outbox.Core/Outbox.Core.csproj" />
+    <PackageReference Include="Azure.Messaging.EventHubs" Version="5.12.0" />
+  </ItemGroup>
+</Project>

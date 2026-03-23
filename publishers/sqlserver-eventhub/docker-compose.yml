@@ -1,0 +1,74 @@
+name: outbox-publisher-sqlserver-eventhub
+
+networks:
+  outbox-net:
+    driver: bridge
+
+services:
+  azuresqledge:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: ${ACCEPT_EULA}
+      SA_PASSWORD: ${SA_PASSWORD}
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket; s=socket.socket(); s.connect(('localhost',1433)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [outbox-net]
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+    networks: [outbox-net]
+
+  eventhub-emulator:
+    image: mcr.microsoft.com/azure-messaging/eventhubs-emulator:latest
+    ports:
+      - "5672:5672"
+    volumes:
+      - ./eventhub-config/Config.json:/Eventhubs_Emulator/ConfigFiles/Config.json
+    environment:
+      BLOB_SERVER: azurite
+      METADATA_SERVER: azurite
+      ACCEPT_EULA: ${ACCEPT_EULA}
+    depends_on:
+      - azurite
+    networks:
+      outbox-net:
+        aliases:
+          - eventhubs-emulator
+
+  dbinit:
+    build:
+      context: ../..
+      dockerfile: tools/dbinit/Dockerfile
+    environment:
+      SQLSERVER_CONN: "Server=azuresqledge,1433;Database=outbox;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+    depends_on:
+      azuresqledge:
+        condition: service_healthy
+    networks: [outbox-net]
+
+  publisher:
+    build:
+      context: ../..
+      dockerfile: publishers/sqlserver-eventhub/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=outbox;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      Outbox__EventHub__ConnectionString: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      Outbox__EventHub__EventHubName: "orders"
+    restart: unless-stopped
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+      eventhub-emulator:
+        condition: service_started
+    networks: [outbox-net]

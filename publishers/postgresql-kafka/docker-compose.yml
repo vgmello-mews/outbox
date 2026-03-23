@@ -1,0 +1,66 @@
+name: outbox-publisher-postgresql-kafka
+
+networks:
+  outbox-net:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-outbox}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [outbox-net]
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --mode dev-container
+      - --smp 1
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:9644/v1/node_config"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [outbox-net]
+
+  dbinit:
+    build:
+      context: ../..
+      dockerfile: tools/dbinit/Dockerfile
+    environment:
+      POSTGRES_CONN: "Host=postgres;Username=postgres;Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB:-outbox}"
+      REDPANDA_BROKERS: "redpanda:9092"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks: [outbox-net]
+
+  publisher:
+    build:
+      context: ../..
+      dockerfile: publishers/postgresql-kafka/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Host=postgres;Username=postgres;Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB:-outbox}"
+      Outbox__Kafka__BootstrapServers: "redpanda:9092"
+    restart: unless-stopped
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+    networks: [outbox-net]

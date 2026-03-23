@@ -134,7 +134,7 @@ ipch/
 *.sap
 
 # Visual Studio Trace Files
-*.e2e
+#*.e2e
 
 # TFS 2012 Local Workspace
 $tf/
@@ -416,3 +416,26 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Docs
+**/docs/reference
+**/docs/.vitepress/cache
+**/docs/.vitepress/dist
+**/docs/.vitepress/.temp
+**/docs/plans/
+
+# Idea / Rider files
+.idea/
+
+# Internal Generated Code
+**/Internal/Generated/
+
+# macOS metadata files
+.DS_Store
+._*
+**/._bin
+**/._obj
+temp/
+
+# Perf Tests Results
+**/tests/**/results
