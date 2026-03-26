@@ -22,6 +22,8 @@ The Confluent.Kafka `IProducer<K,V>.Flush()` method is synchronous by design —
 
 **Residual risk:** Under sustained Kafka backpressure, the long-running thread is still blocked (by design), but this no longer affects the ThreadPool or the other publisher loops (heartbeat, rebalance, orphan sweep).
 
+**Interaction with `PublishThreadCount`:** With the default `PublishThreadCount = 4`, up to 4 concurrent `SendAsync` calls can each trigger a long-running flush thread. This multiplies the thread usage but does not affect the ThreadPool since each uses `TaskCreationOptions.LongRunning`. If thread pressure is observed under high load, reduce `PublishThreadCount` for Kafka transports.
+
 ---
 
 ### Issue: Kafka ghost writes after flush timeout

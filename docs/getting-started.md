@@ -243,6 +243,17 @@ Scale horizontally by running multiple instances. Partitions are automatically d
 - 2 publishers → ~32 partitions each
 - 4 publishers → ~16 partitions each
 
+Each publisher instance also processes its partitions using 4 parallel threads by default. Tune this with `PublishThreadCount`:
+
+```csharp
+services.AddOutbox(options =>
+{
+    options.PublishThreadCount = 8; // default: 4
+});
+```
+
+The parallelism benefit scales with partition key diversity — workloads concentrated on a single partition key will see no improvement since ordering requires sequential processing per key.
+
 Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [architecture.md](architecture.md) for details.
 
 ## Next steps

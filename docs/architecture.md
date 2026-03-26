@@ -206,6 +206,20 @@ When a publisher stops heartbeating, its partitions aren't immediately reassigne
 
 If the original publisher comes back and heartbeats, the grace period is cancelled. If it doesn't, the partition becomes claimable.
 
+### Parallel publish threads
+
+Each publisher runs `PublishThreadCount` (default 4) concurrent workers within its single publish loop. The coordinator polls a batch of messages, groups them by `(TopicName, PartitionKey)`, and assigns each group to a worker using:
+
+```
+worker_index = (hash(partition_key) % total_partitions) % PublishThreadCount
+```
+
+This guarantees that messages with the same partition key are always processed by the same worker, preserving ordering. Different partition keys can be processed concurrently across workers.
+
+The 4 housekeeping loops (heartbeat, rebalance, orphan sweep, dead-letter sweep) remain single-instance. Only the publish work is parallelized.
+
+Set `PublishThreadCount = 1` to revert to sequential single-thread processing.
+
 ## Circuit breaker
 
 Each topic has its own circuit breaker that prevents retry-count burn during broker outages.
