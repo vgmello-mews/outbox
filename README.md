@@ -250,6 +250,45 @@ Each instance processes its partitions using `PublishThreadCount` parallel threa
 
 Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [docs/architecture.md](docs/architecture.md) for details.
 
+## Publisher groups
+
+Run multiple independent outbox pipelines in the same application. Each group gets its own outbox table, dead-letter table, partitions, health check, and configuration:
+
+```csharp
+builder.Services.AddOutbox("orders", builder.Configuration, outbox =>
+{
+    outbox.UsePostgreSql(async (sp, ct) =>
+    {
+        var conn = new NpgsqlConnection(
+            sp.GetRequiredService<IConfiguration>().GetConnectionString("OutboxDb"));
+        return conn;
+    });
+    outbox.UseKafka();
+});
+
+builder.Services.AddOutbox("notifications", builder.Configuration, outbox =>
+{
+    outbox.UsePostgreSql(async (sp, ct) =>
+    {
+        var conn = new NpgsqlConnection(
+            sp.GetRequiredService<IConfiguration>().GetConnectionString("OutboxDb"));
+        return conn;
+    });
+    outbox.UseKafka();
+});
+```
+
+Override settings per group programmatically when needed:
+
+```csharp
+builder.Services.Configure<OutboxPublisherOptions>("orders", o =>
+{
+    o.PublishThreadCount = 8;
+});
+```
+
+Each group runs its own `OutboxPublisherService` instance with independent partition ownership, circuit breakers, and health state. The shared `Outbox:Publisher` config section applies to all groups as a baseline.
+
 ## Further reading
 
 - [Architecture](docs/architecture.md) — How the publisher, ordering, and partitioning work
