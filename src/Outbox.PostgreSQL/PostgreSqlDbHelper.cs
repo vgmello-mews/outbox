@@ -8,23 +8,26 @@ namespace Outbox.PostgreSQL;
 
 internal sealed class PostgreSqlDbHelper
 {
-    private readonly Func<IServiceProvider, CancellationToken, Task<DbConnection>> _connectionFactory;
     private readonly IServiceProvider _serviceProvider;
     private readonly PostgreSqlStoreOptions _options;
 
     public PostgreSqlDbHelper(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         PostgreSqlStoreOptions options)
     {
-        _connectionFactory = connectionFactory;
         _serviceProvider = serviceProvider;
         _options = options;
     }
 
     public async Task<DbConnection> OpenConnectionAsync(CancellationToken ct)
     {
-        var conn = await _connectionFactory(_serviceProvider, ct).ConfigureAwait(false);
+        DbConnection conn;
+
+        if (_options.ConnectionFactory is not null)
+            conn = await _options.ConnectionFactory(_serviceProvider, ct).ConfigureAwait(false);
+        else
+            conn = new NpgsqlConnection(_options.ConnectionString);
+
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync(ct).ConfigureAwait(false);
 

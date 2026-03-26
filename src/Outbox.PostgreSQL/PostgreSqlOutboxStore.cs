@@ -1,7 +1,6 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Data;
-using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -23,7 +22,6 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private long _partitionCountRefreshedAtTicks;
 
     public PostgreSqlOutboxStore(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         IOptionsMonitor<PostgreSqlStoreOptions> optionsMonitor,
         IOptionsMonitor<OutboxPublisherOptions> publisherOptions,
@@ -32,7 +30,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         _optionsName = groupName ?? Options.DefaultName;
         _options = optionsMonitor.Get(_optionsName);
         _publisherOptions = publisherOptions;
-        _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
+        _db = new PostgreSqlDbHelper(serviceProvider, _options);
         _queries = new PostgreSqlQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());

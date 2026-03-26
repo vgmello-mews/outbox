@@ -1,6 +1,5 @@
 // Copyright (c) OrgName. All rights reserved.
 
-using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
@@ -15,13 +14,12 @@ public sealed class PostgreSqlDeadLetterManager : IDeadLetterManager
     private readonly PostgreSqlQueries _queries;
 
     public PostgreSqlDeadLetterManager(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         IOptionsMonitor<PostgreSqlStoreOptions> optionsMonitor,
         string? groupName = null)
     {
         _options = optionsMonitor.Get(groupName ?? Options.DefaultName);
-        _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
+        _db = new PostgreSqlDbHelper(serviceProvider, _options);
         _queries = new PostgreSqlQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());
