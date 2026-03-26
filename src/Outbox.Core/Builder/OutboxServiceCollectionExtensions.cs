@@ -54,6 +54,7 @@ public static class OutboxServiceCollectionExtensions
     {
         services.AddOptions<OutboxPublisherOptions>(groupName)
             .BindConfiguration("Outbox:Publisher")
+            .BindConfiguration($"Outbox:{groupName}:Publisher")
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
