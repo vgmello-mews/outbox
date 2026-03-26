@@ -218,6 +218,8 @@ This guarantees that messages with the same partition key are always processed b
 
 The 4 housekeeping loops (heartbeat, rebalance, orphan sweep, dead-letter sweep) remain single-instance. Only the publish work is parallelized.
 
+When using [publisher groups](#publisher-groups), each group has its own independent `PublishThreadCount`. Configure it per group in the `AddOutbox` registration.
+
 Set `PublishThreadCount = 1` to revert to sequential single-thread processing.
 
 ## Circuit breaker

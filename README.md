@@ -1,4 +1,6 @@
-# Getting started
+# Outbox Library
+
+A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and stores (PostgreSQL, SQL Server). Guarantees at-least-once delivery with partition-based work distribution across multiple publisher instances.
 
 Wire up the outbox publisher in under 10 lines of code.
 
@@ -20,7 +22,7 @@ dotnet add package Outbox.SqlServer
 
 # Transport (pick one)
 dotnet add package Outbox.Kafka
-dotbox add package Outbox.EventHub
+dotnet add package Outbox.EventHub
 ```
 
 Both store and transport packages pull in `Outbox.Core` automatically.
@@ -110,7 +112,7 @@ For SQL Server store, use `"SqlServer"` instead of `"PostgreSql"`:
 }
 ```
 
-See [architecture.md](architecture.md) for the full options reference.
+See [docs/architecture.md](docs/architecture.md) for the full options reference.
 
 ## Database setup
 
@@ -252,13 +254,27 @@ services.AddOutbox(options =>
 });
 ```
 
+When using publisher groups, each group has its own `PublishThreadCount`:
+
+```csharp
+services.AddOutbox("orders", options =>
+{
+    options.PublishThreadCount = 8; // high-throughput group
+}, outbox => { ... });
+
+services.AddOutbox("audit", options =>
+{
+    options.PublishThreadCount = 1; // low-volume, sequential
+}, outbox => { ... });
+```
+
 The parallelism benefit scales with partition key diversity — workloads concentrated on a single partition key will see no improvement since ordering requires sequential processing per key.
 
-Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [architecture.md](architecture.md) for details.
+Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [docs/architecture.md](docs/architecture.md) for details.
 
-## Next steps
+## Further reading
 
-- [Architecture](architecture.md) — Deep dive into how the publisher, ordering, and partitioning work
-- [Production runbook](production-runbook.md) — Monitoring, alerts, and incident response
-- [Failure scenarios](failure-scenarios-and-integration-tests.md) — All 14 tested failure modes
-- [Known limitations](known-limitations.md) — Transport-specific trade-offs
+- [Architecture](docs/architecture.md) — Deep dive into how the publisher, ordering, and partitioning work
+- [Production runbook](docs/production-runbook.md) — Monitoring, alerts, and incident response
+- [Failure scenarios](docs/failure-scenarios-and-integration-tests.md) — All 14 tested failure modes
+- [Known limitations](docs/known-limitations.md) — Transport-specific trade-offs
