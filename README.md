@@ -1,8 +1,6 @@
-# Outbox Library
+# Outbox library
 
 A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and stores (PostgreSQL, SQL Server). Guarantees at-least-once delivery with partition-based work distribution across multiple publisher instances.
-
-Wire up the outbox publisher in under 10 lines of code.
 
 ## Prerequisites
 
@@ -27,7 +25,7 @@ dotnet add package Outbox.EventHub
 
 Both store and transport packages pull in `Outbox.Core` automatically.
 
-## Wire up the publisher
+## Set up the publisher
 
 ### PostgreSQL + Kafka
 
@@ -78,7 +76,8 @@ Add to `appsettings.json`:
         "Publisher": {
             "BatchSize": 100,
             "MaxRetryCount": 5,
-            "LeaseDurationSeconds": 45
+            "LeaseDurationSeconds": 45,
+            "PublishThreadCount": 4
         },
         "Kafka": {
             "BootstrapServers": "localhost:9092"
@@ -87,19 +86,21 @@ Add to `appsettings.json`:
 }
 ```
 
+`PublishThreadCount` controls how many parallel threads process partitions within each publisher instance. The default of 4 works well for most workloads. Set to 1 for sequential processing. The benefit scales with partition key diversity—workloads concentrated on a single partition key won't see improvement since ordering requires sequential processing per key.
+
 For EventHub, replace the `Kafka` section:
 
 ```json
 {
-  "Outbox": {
-    "EventHub": {
-      "ConnectionString": "Endpoint=sb://my-namespace.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
+    "Outbox": {
+        "EventHub": {
+            "ConnectionString": "Endpoint=sb://my-namespace.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
+        }
     }
-  }
 }
 ```
 
-For SQL Server store, use `"SqlServer"` instead of `"PostgreSql"`:
+For SQL Server, use `"SqlServer"` instead of `"PostgreSql"`:
 
 ```json
 {
@@ -132,7 +133,7 @@ sqlcmd -d myapp -i src/Outbox.SqlServer/db_scripts/install.sql
 
 This creates four tables (`outbox`, `outbox_dead_letter`, `outbox_publishers`, `outbox_partitions`), indexes, diagnostic views, and seeds 64 partitions.
 
-## Writing messages to the outbox
+## Write messages to the outbox
 
 Insert messages into the `outbox` table within the same transaction as your business data:
 
@@ -148,7 +149,7 @@ VALUES ('orders', 'order-123', 'OrderCreated', CAST('{"id": "order-123"}' AS VAR
 
 The publisher picks up new rows automatically through its polling loop.
 
-### Using headers
+### Use headers
 
 Store headers as a JSON dictionary in the `headers` column:
 
@@ -159,7 +160,7 @@ VALUES ('orders', 'order-123', 'OrderCreated',
         '{"id": "order-123"}'::bytea, clock_timestamp());
 ```
 
-### Ordering multiple events in one transaction
+### Order multiple events in one transaction
 
 Use `event_ordinal` to order events that share the same `event_datetime_utc`:
 
@@ -170,7 +171,7 @@ VALUES
     ('orders', 'order-123', 'OrderApproved', '...'::bytea, clock_timestamp(), 1);
 ```
 
-## Event handler (optional)
+## Event handlers
 
 Receive lifecycle callbacks:
 
@@ -194,7 +195,7 @@ public class MyEventHandler : IOutboxEventHandler
 outbox.ConfigureEvents<MyEventHandler>();
 ```
 
-## Message interceptors (optional)
+## Message interceptors
 
 Transform messages before they reach the broker:
 
@@ -237,44 +238,21 @@ app.MapPost("/dead-letters/replay", async (IDeadLetterManager dlm, long[] ids) =
     await dlm.ReplayAsync(ids, CancellationToken.None));
 ```
 
-## Running multiple publishers
+## Scale with multiple publishers
 
-Scale horizontally by running multiple instances. Partitions are automatically distributed:
+Run multiple instances to scale horizontally. Partitions are automatically distributed:
 
-- 1 publisher → owns all 64 partitions
-- 2 publishers → ~32 partitions each
-- 4 publishers → ~16 partitions each
+- 1 publisher — owns all 64 partitions
+- 2 publishers — ~32 partitions each
+- 4 publishers — ~16 partitions each
 
-Each publisher instance also processes its partitions using 4 parallel threads by default. Tune this with `PublishThreadCount`:
-
-```csharp
-services.AddOutbox(options =>
-{
-    options.PublishThreadCount = 8; // default: 4
-});
-```
-
-When using publisher groups, each group has its own `PublishThreadCount`:
-
-```csharp
-services.AddOutbox("orders", options =>
-{
-    options.PublishThreadCount = 8; // high-throughput group
-}, outbox => { ... });
-
-services.AddOutbox("audit", options =>
-{
-    options.PublishThreadCount = 1; // low-volume, sequential
-}, outbox => { ... });
-```
-
-The parallelism benefit scales with partition key diversity — workloads concentrated on a single partition key will see no improvement since ordering requires sequential processing per key.
+Each instance processes its partitions using `PublishThreadCount` parallel threads (default 4). When using publisher groups, each group gets its own independent thread count—configure it in `appsettings.json` or per-group in the `AddOutbox` registration.
 
 Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [docs/architecture.md](docs/architecture.md) for details.
 
 ## Further reading
 
-- [Architecture](docs/architecture.md) — Deep dive into how the publisher, ordering, and partitioning work
+- [Architecture](docs/architecture.md) — How the publisher, ordering, and partitioning work
 - [Production runbook](docs/production-runbook.md) — Monitoring, alerts, and incident response
 - [Failure scenarios](docs/failure-scenarios-and-integration-tests.md) — All 14 tested failure modes
 - [Known limitations](docs/known-limitations.md) — Transport-specific trade-offs
