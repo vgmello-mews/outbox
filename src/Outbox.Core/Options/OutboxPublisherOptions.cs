@@ -50,6 +50,9 @@ public sealed class OutboxPublisherOptions : IValidatableObject
     [Range(1, int.MaxValue)]
     public int CircuitBreakerOpenDurationSeconds { get; set; } = 30;
 
+    [Range(1, int.MaxValue)]
+    public int PublishThreadCount { get; set; } = 4;
+
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (MaxPollIntervalMs < MinPollIntervalMs)

@@ -22,7 +22,8 @@ public class OutboxPublisherOptionsTests
         MaxPollIntervalMs = 5000,
         RebalanceIntervalMs = 30_000,
         OrphanSweepIntervalMs = 60_000,
-        DeadLetterSweepIntervalMs = 60_000
+        DeadLetterSweepIntervalMs = 60_000,
+        PublishThreadCount = 4
     };
 
     private static List<ValidationResult> Validate(OutboxPublisherOptions options)
@@ -194,6 +195,34 @@ public class OutboxPublisherOptionsTests
         var results = Validate(options);
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.MemberNames.Contains("CircuitBreakerOpenDurationSeconds"));
+    }
+
+    [Fact]
+    public void PublishThreadCount_Zero_ReturnsFailure()
+    {
+        var options = ValidOptions();
+        options.PublishThreadCount = 0;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("PublishThreadCount"));
+    }
+
+    [Fact]
+    public void PublishThreadCount_One_ReturnsSuccess()
+    {
+        var options = ValidOptions();
+        options.PublishThreadCount = 1;
+        var results = Validate(options);
+        Assert.DoesNotContain(results, r => r.MemberNames.Contains("PublishThreadCount"));
+    }
+
+    [Fact]
+    public void PublishThreadCount_Four_ReturnsSuccess()
+    {
+        var options = ValidOptions();
+        options.PublishThreadCount = 4;
+        var results = Validate(options);
+        Assert.DoesNotContain(results, r => r.MemberNames.Contains("PublishThreadCount"));
     }
 
     [Fact]
