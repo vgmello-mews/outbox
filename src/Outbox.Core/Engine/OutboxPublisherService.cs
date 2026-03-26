@@ -319,12 +319,52 @@ internal sealed class OutboxPublisherService : BackgroundService
                     .GroupBy(m => (m.TopicName, m.PartitionKey))
                     .ToList();
 
+                // Snapshot total partitions once for this cycle
+                var totalPartitions = await _store.GetTotalPartitionsAsync(ct);
+
+                // Assign groups to workers by partition affinity
+                var workerCount = opts.PublishThreadCount;
+                var workerGroups = new List<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>>[workerCount];
+                for (var i = 0; i < workerCount; i++)
+                    workerGroups[i] = [];
+
+                foreach (var group in groups)
+                {
+                    var workerIndex = ComputeWorkerIndex(group.Key.PartitionKey, totalPartitions, workerCount);
+                    workerGroups[workerIndex].Add(group);
+                }
+
                 var publishedAny = false;
 
                 try
                 {
-                    publishedAny = await ProcessGroupsAsync(
-                        publisherId, groups, circuitBreaker, unprocessedSequences, ct);
+                    // Launch workers concurrently
+                    var workerTasks = workerGroups
+                        .Where(wg => wg.Count > 0)
+                        .Select(wg => ProcessGroupsAsync(
+                            publisherId, wg, circuitBreaker, unprocessedSequences, ct))
+                        .ToArray();
+
+                    try
+                    {
+                        await Task.WhenAll(workerTasks);
+                    }
+                    catch
+                    {
+                        // Log ALL faulted worker exceptions (Task.WhenAll only throws the first)
+                        foreach (var task in workerTasks.Where(t => t.IsFaulted))
+                        {
+                            foreach (var ex in task.Exception!.InnerExceptions)
+                            {
+                                _logger.LogError(ex, "Publish worker faulted unexpectedly");
+                            }
+                        }
+                    }
+
+                    // Aggregate publishedAny from all completed workers
+                    publishedAny = workerTasks
+                        .Where(t => t.IsCompletedSuccessfully)
+                        .Any(t => t.Result);
                 }
                 finally
                 {
@@ -802,6 +842,15 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
 
         return result ?? messages;
+    }
+
+    private static int ComputeWorkerIndex(string partitionKey, int totalPartitions, int workerCount)
+    {
+        // Deterministic hash for in-memory worker assignment within a poll cycle.
+        // Does NOT need to match the SQL hash — only needs consistency within a single process.
+        var hash = (uint)partitionKey.GetHashCode();
+        var partitionId = (int)(hash % (uint)totalPartitions);
+        return partitionId % workerCount;
     }
 
     private OutboxPublisherOptions GetOptions() =>

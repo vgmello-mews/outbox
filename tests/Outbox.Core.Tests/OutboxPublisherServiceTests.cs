@@ -58,6 +58,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         _optionsMonitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
         _optionsMonitor.CurrentValue.Returns(_options);
         _optionsMonitor.Get(Arg.Any<string>()).Returns(_options);
+
+        _store.GetTotalPartitionsAsync(Arg.Any<CancellationToken>()).Returns(64);
     }
 
     public void Dispose()
