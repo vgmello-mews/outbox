@@ -22,8 +22,9 @@ public static class EventHubOutboxBuilderExtensions
 
         if (groupName is not null)
         {
-            builder.Services.Configure<EventHubTransportOptions>(groupName,
-                builder.Configuration.GetSection("Outbox:EventHub"));
+            builder.Services.AddOptions<EventHubTransportOptions>(groupName)
+                .BindConfiguration("Outbox:EventHub")
+                .BindConfiguration($"Outbox:{groupName}:EventHub");
 
             if (configure is not null)
                 builder.Services.Configure(groupName, configure);
@@ -52,8 +53,8 @@ public static class EventHubOutboxBuilderExtensions
         }
         else
         {
-            builder.Services.Configure<EventHubTransportOptions>(
-                builder.Configuration.GetSection("Outbox:EventHub"));
+            builder.Services.AddOptions<EventHubTransportOptions>()
+                .BindConfiguration("Outbox:EventHub");
 
             if (configure is not null)
                 builder.Services.Configure(configure);
