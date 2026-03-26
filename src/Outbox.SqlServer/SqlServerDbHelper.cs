@@ -1,7 +1,6 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Data;
-using System.Data.Common;
 using Dapper;
 using Microsoft.Data.SqlClient;
 
@@ -9,23 +8,26 @@ namespace Outbox.SqlServer;
 
 internal sealed class SqlServerDbHelper
 {
-    private readonly Func<IServiceProvider, CancellationToken, Task<DbConnection>> _connectionFactory;
     private readonly IServiceProvider _serviceProvider;
     private readonly SqlServerStoreOptions _options;
 
     public SqlServerDbHelper(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         SqlServerStoreOptions options)
     {
-        _connectionFactory = connectionFactory;
         _serviceProvider = serviceProvider;
         _options = options;
     }
 
     public async Task<SqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
-        var conn = (SqlConnection)await _connectionFactory(_serviceProvider, ct).ConfigureAwait(false);
+        SqlConnection conn;
+
+        if (_options.ConnectionFactory is not null)
+            conn = (SqlConnection)await _options.ConnectionFactory(_serviceProvider, ct).ConfigureAwait(false);
+        else
+            conn = new SqlConnection(_options.ConnectionString);
+
         if (conn.State != ConnectionState.Open)
             await conn.OpenAsync(ct).ConfigureAwait(false);
 

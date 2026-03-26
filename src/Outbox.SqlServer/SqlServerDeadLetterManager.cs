@@ -1,6 +1,5 @@
 // Copyright (c) OrgName. All rights reserved.
 
-using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
@@ -18,13 +17,12 @@ public sealed class SqlServerDeadLetterManager : IDeadLetterManager
     private readonly SqlServerQueries _queries;
 
     public SqlServerDeadLetterManager(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
         string? groupName = null)
     {
         _options = optionsMonitor.Get(groupName ?? Microsoft.Extensions.Options.Options.DefaultName);
-        _db = new SqlServerDbHelper(connectionFactory, serviceProvider, _options);
+        _db = new SqlServerDbHelper(serviceProvider, _options);
         _queries = new SqlServerQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());

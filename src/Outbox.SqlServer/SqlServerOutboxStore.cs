@@ -1,7 +1,6 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Data;
-using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
@@ -25,7 +24,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     private long _partitionCountRefreshedAtTicks;
 
     public SqlServerOutboxStore(
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
         IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
         IOptionsMonitor<OutboxPublisherOptions> publisherOptions,
@@ -34,7 +32,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         _optionsName = groupName ?? Microsoft.Extensions.Options.Options.DefaultName;
         _options = optionsMonitor.Get(_optionsName);
         _publisherOptions = publisherOptions;
-        _db = new SqlServerDbHelper(connectionFactory, serviceProvider, _options);
+        _db = new SqlServerDbHelper(serviceProvider, _options);
         _queries = new SqlServerQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());

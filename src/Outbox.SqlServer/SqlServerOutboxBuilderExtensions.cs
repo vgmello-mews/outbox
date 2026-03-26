@@ -1,6 +1,5 @@
 // Copyright (c) OrgName. All rights reserved.
 
-using System.Data.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -12,10 +11,12 @@ namespace Outbox.SqlServer;
 
 public static class SqlServerOutboxBuilderExtensions
 {
+    public static IOutboxBuilder UseSqlServer(this IOutboxBuilder builder)
+        => builder.UseSqlServer(configure: null);
+
     public static IOutboxBuilder UseSqlServer(
         this IOutboxBuilder builder,
-        Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
-        Action<SqlServerStoreOptions>? configure = null)
+        Action<SqlServerStoreOptions>? configure)
     {
         var groupName = builder.GroupName;
 
@@ -23,6 +24,7 @@ public static class SqlServerOutboxBuilderExtensions
         {
             builder.Services.AddOptions<SqlServerStoreOptions>(groupName)
                 .BindConfiguration("Outbox:SqlServer")
+                .BindConfiguration($"Outbox:{groupName}:SqlServer")
                 .ValidateDataAnnotations()
                 .ValidateOnStart();
 
@@ -31,17 +33,14 @@ public static class SqlServerOutboxBuilderExtensions
 
             builder.Services.Configure<SqlServerStoreOptions>(groupName, o => o.GroupName = groupName);
 
-            builder.Services.AddKeyedSingleton(groupName, connectionFactory);
             builder.Services.TryAddKeyedSingleton<IOutboxStore>(groupName, (sp, key) =>
                 new SqlServerOutboxStore(
-                    sp.GetRequiredKeyedService<Func<IServiceProvider, CancellationToken, Task<DbConnection>>>(key),
                     sp,
                     sp.GetRequiredService<IOptionsMonitor<SqlServerStoreOptions>>(),
                     sp.GetRequiredService<IOptionsMonitor<OutboxPublisherOptions>>(),
                     groupName));
             builder.Services.TryAddKeyedSingleton<IDeadLetterManager>(groupName, (sp, key) =>
                 new SqlServerDeadLetterManager(
-                    sp.GetRequiredKeyedService<Func<IServiceProvider, CancellationToken, Task<DbConnection>>>(key),
                     sp,
                     sp.GetRequiredService<IOptionsMonitor<SqlServerStoreOptions>>(),
                     groupName));
@@ -56,17 +55,13 @@ public static class SqlServerOutboxBuilderExtensions
             if (configure is not null)
                 builder.Services.Configure(configure);
 
-            builder.Services.AddSingleton(connectionFactory);
-
             builder.Services.TryAddSingleton<IOutboxStore>(sp =>
                 new SqlServerOutboxStore(
-                    sp.GetRequiredService<Func<IServiceProvider, CancellationToken, Task<DbConnection>>>(),
                     sp,
                     sp.GetRequiredService<IOptionsMonitor<SqlServerStoreOptions>>(),
                     sp.GetRequiredService<IOptionsMonitor<OutboxPublisherOptions>>()));
             builder.Services.TryAddSingleton<IDeadLetterManager>(sp =>
                 new SqlServerDeadLetterManager(
-                    sp.GetRequiredService<Func<IServiceProvider, CancellationToken, Task<DbConnection>>>(),
                     sp,
                     sp.GetRequiredService<IOptionsMonitor<SqlServerStoreOptions>>()));
         }
