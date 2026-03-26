@@ -252,7 +252,9 @@ Rebalancing happens automatically. Grace periods prevent dual processing during 
 
 ## Publisher groups
 
-Run multiple independent outbox pipelines in the same application. Each group gets its own outbox table, dead-letter table, partitions, health check, and configuration:
+Run multiple independent outbox pipelines in the same application. Each group gets its own outbox table, dead-letter table, partitions, health check, and configuration.
+
+Use a table prefix per group so each group writes to separate tables in the same database:
 
 ```csharp
 builder.Services.AddOutbox("orders", builder.Configuration, outbox =>
@@ -276,18 +278,24 @@ builder.Services.AddOutbox("notifications", builder.Configuration, outbox =>
     });
     outbox.UseKafka();
 });
+
+// Set table prefixes so each group has isolated tables
+builder.Services.Configure<PostgreSqlStoreOptions>("orders", o => o.TablePrefix = "orders_");
+builder.Services.Configure<PostgreSqlStoreOptions>("notifications", o => o.TablePrefix = "notifications_");
 ```
 
-Override settings per group programmatically when needed:
+This creates `orders_outbox`, `orders_outbox_dead_letter` for the orders group and `notifications_outbox`, `notifications_outbox_dead_letter` for notifications. Run the install script once per prefix, adjusting table names accordingly.
+
+Override publisher settings per group the same way:
 
 ```csharp
 builder.Services.Configure<OutboxPublisherOptions>("orders", o =>
 {
-    o.PublishThreadCount = 8;
+    o.PublishThreadCount = 8; // high-throughput group
 });
 ```
 
-Each group runs its own `OutboxPublisherService` instance with independent partition ownership, circuit breakers, and health state. The shared `Outbox:Publisher` config section applies to all groups as a baseline.
+Each group runs its own `OutboxPublisherService` instance with independent partition ownership, circuit breakers, and health state. The shared `Outbox:Publisher` and `Outbox:PostgreSql` config sections apply to all groups as a baseline.
 
 ## Further reading
 
