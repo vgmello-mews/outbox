@@ -1961,4 +1961,131 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         Assert.True(_healthState.ConsecutiveLoopRestarts > 0,
             "Expected at least one loop restart from consecutive heartbeat failures");
     }
+
+    [Fact]
+    public async Task PublishLoop_with_parallel_threads_publishes_all_partition_key_groups()
+    {
+        _options.PublishThreadCount = 4;
+
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
+
+        var messages = new[]
+        {
+            MakeMessage(1, "orders", "pk-a"),
+            MakeMessage(2, "orders", "pk-b"),
+            MakeMessage(3, "orders", "pk-c"),
+            MakeMessage(4, "orders", "pk-d"),
+        };
+
+        var callCount = 0;
+        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                if (Interlocked.Increment(ref callCount) == 1)
+                    return messages;
+                return Array.Empty<OutboxMessage>();
+            });
+
+        var service = CreateService();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        // All 4 groups (different partition keys) should have been sent
+        await _transport.Received(4).SendAsync(
+            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PublishLoop_with_single_thread_publishes_all_groups()
+    {
+        _options.PublishThreadCount = 1;
+
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
+
+        var messages = new[] { MakeMessage(1, "orders", "pk-a"), MakeMessage(2, "orders", "pk-b") };
+
+        var callCount = 0;
+        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                if (Interlocked.Increment(ref callCount) == 1)
+                    return messages;
+                return Array.Empty<OutboxMessage>();
+            });
+
+        var service = CreateService();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        await _transport.Received(2).SendAsync(
+            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PublishLoop_worker_failure_does_not_block_other_workers()
+    {
+        _options.PublishThreadCount = 2;
+
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
+
+        var messages = new[] { MakeMessage(1, "orders", "pk-a"), MakeMessage(2, "orders", "pk-b") };
+
+        var callCount = 0;
+        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                if (Interlocked.Increment(ref callCount) == 1)
+                    return messages;
+                return Array.Empty<OutboxMessage>();
+            });
+
+        // Make transport throw only for pk-a
+        _transport.SendAsync("orders", "pk-a", Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("broker down"));
+
+        var service = CreateService();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        // pk-b should still be published successfully
+        await _transport.Received().SendAsync(
+            "orders", "pk-b",
+            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
+
+        // pk-a should have its lease released with retry increment
+        await _store.Received().ReleaseLeaseAsync(
+            Arg.Any<string>(),
+            Arg.Is<IReadOnlyList<long>>(ids => ids.Contains(1)),
+            true,
+            CancellationToken.None);
+
+        // pk-b should be deleted (published successfully)
+        await _store.Received().DeletePublishedAsync(
+            Arg.Any<string>(),
+            Arg.Is<IReadOnlyList<long>>(ids => ids.Contains(2)),
+            Arg.Any<CancellationToken>());
+    }
 }
