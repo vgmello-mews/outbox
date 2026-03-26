@@ -1,10 +1,12 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.ComponentModel.DataAnnotations;
+using System.Data.Common;
+using System.Text.Json.Serialization;
 
 namespace Outbox.SqlServer;
 
-public sealed class SqlServerStoreOptions
+public sealed class SqlServerStoreOptions : IValidatableObject
 {
     [Required]
     [RegularExpression(@"^[a-zA-Z_][a-zA-Z0-9_]*$",
@@ -31,7 +33,22 @@ public sealed class SqlServerStoreOptions
         ErrorMessage = "SharedSchemaName must match pattern [a-zA-Z_][a-zA-Z0-9_]*.")]
     public string? SharedSchemaName { get; set; }
 
+    public string? ConnectionString { get; set; }
+
+    [JsonIgnore]
+    public Func<IServiceProvider, CancellationToken, Task<DbConnection>>? ConnectionFactory { get; set; }
+
     public string GetOutboxTableName() => $"{TablePrefix}Outbox";
 
     public string GetSharedSchemaName() => SharedSchemaName ?? SchemaName;
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (ConnectionFactory is null && string.IsNullOrEmpty(ConnectionString))
+        {
+            yield return new ValidationResult(
+                "Either ConnectionString or ConnectionFactory must be set.",
+                new[] { nameof(ConnectionString), nameof(ConnectionFactory) });
+        }
+    }
 }

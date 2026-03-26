@@ -1,6 +1,8 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.ComponentModel.DataAnnotations;
+using System.Data.Common;
+using Microsoft.Data.SqlClient;
 using Outbox.SqlServer;
 using Xunit;
 
@@ -53,7 +55,7 @@ public class SqlServerStoreOptionsTests
     [InlineData("Schema123")]
     public void ValidSchemaName_SetsSuccessfully(string schemaName)
     {
-        var options = new SqlServerStoreOptions { SchemaName = schemaName };
+        var options = new SqlServerStoreOptions { SchemaName = schemaName, ConnectionString = "Server=." };
         var results = Validate(options);
         Assert.Empty(results);
     }
@@ -87,7 +89,7 @@ public class SqlServerStoreOptionsTests
     [InlineData("_prefix")]
     public void TablePrefix_ValidPrefixes_Accepted(string prefix)
     {
-        var opts = new SqlServerStoreOptions { TablePrefix = prefix };
+        var opts = new SqlServerStoreOptions { TablePrefix = prefix, ConnectionString = "Server=." };
         var results = Validate(opts);
         Assert.Empty(results);
     }
@@ -109,7 +111,7 @@ public class SqlServerStoreOptionsTests
     [Fact]
     public void TablePrefix_EmptyString_Allowed()
     {
-        var opts = new SqlServerStoreOptions { TablePrefix = "" };
+        var opts = new SqlServerStoreOptions { TablePrefix = "", ConnectionString = "Server=." };
         var results = Validate(opts);
         Assert.Empty(results);
     }
@@ -163,5 +165,55 @@ public class SqlServerStoreOptionsTests
     {
         var opts = new SqlServerStoreOptions { SchemaName = "custom", SharedSchemaName = "shared" };
         Assert.Equal("shared", opts.GetSharedSchemaName());
+    }
+
+    [Fact]
+    public void ConnectionString_Only_IsValid()
+    {
+        var opts = new SqlServerStoreOptions { ConnectionString = "Server=.;Database=test" };
+        var results = Validate(opts);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ConnectionFactory_Only_IsValid()
+    {
+        var opts = new SqlServerStoreOptions
+        {
+            ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new SqlConnection())
+        };
+        var results = Validate(opts);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ConnectionString_And_ConnectionFactory_IsValid()
+    {
+        var opts = new SqlServerStoreOptions
+        {
+            ConnectionString = "Server=.;Database=test",
+            ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new SqlConnection())
+        };
+        var results = Validate(opts);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void Neither_ConnectionString_Nor_ConnectionFactory_FailsValidation()
+    {
+        var opts = new SqlServerStoreOptions();
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("ConnectionString"));
+        Assert.Contains(results, r => r.MemberNames.Contains("ConnectionFactory"));
+    }
+
+    [Fact]
+    public void Empty_ConnectionString_Without_ConnectionFactory_FailsValidation()
+    {
+        var opts = new SqlServerStoreOptions { ConnectionString = "" };
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("ConnectionString"));
     }
 }

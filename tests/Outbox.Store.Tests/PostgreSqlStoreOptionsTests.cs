@@ -183,9 +183,9 @@ public class PostgreSqlStoreOptionsTests
             ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new NpgsqlConnection())
         };
         var results = Validate(opts);
-        Assert.Empty(results.Where(r =>
+        Assert.DoesNotContain(results, r =>
             r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)) ||
-            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory))));
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory)));
     }
 
     [Fact]
@@ -197,9 +197,9 @@ public class PostgreSqlStoreOptionsTests
             ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new NpgsqlConnection())
         };
         var results = Validate(opts);
-        Assert.Empty(results.Where(r =>
+        Assert.DoesNotContain(results, r =>
             r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)) ||
-            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory))));
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory)));
     }
 
     [Fact]
