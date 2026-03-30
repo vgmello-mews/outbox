@@ -12,7 +12,7 @@ public sealed record DeadLetteredMessage(
     byte[] Payload,
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
-    short EventOrdinal,
+    int EventOrdinal,
     int RetryCount,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadLetteredAtUtc,

@@ -39,7 +39,7 @@ public class ModelTests
         Assert.Equal(payloadBytes, msg.Payload);
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
-        Assert.Equal((short)3, msg.EventOrdinal);
+        Assert.Equal(3, msg.EventOrdinal);
         Assert.Equal(2, msg.RetryCount);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
     }
@@ -101,7 +101,7 @@ public class ModelTests
         Assert.Equal(payloadBytes, msg.Payload);
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
-        Assert.Equal((short)1, msg.EventOrdinal);
+        Assert.Equal(1, msg.EventOrdinal);
         Assert.Equal(5, msg.RetryCount);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
         Assert.Equal(deadLetteredAt, msg.DeadLetteredAtUtc);

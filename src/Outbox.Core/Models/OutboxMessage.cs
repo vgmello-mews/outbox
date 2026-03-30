@@ -17,8 +17,8 @@ namespace Outbox.Core.Models;
 ///     <para>
 ///         <b>EventOrdinal:</b> A tie-breaker for events that share the same
 ///         <see cref="EventDateTimeUtc" />. Use sequential values (0, 1, 2, ...) within a single
-///         transaction to guarantee deterministic ordering. Range: <c>-32768</c> to <c>32767</c>
-///         (SQL SMALLINT). Defaults to 0 in the database schema if omitted.
+///         transaction to guarantee deterministic ordering. Stored as SQL INT.
+///         Defaults to 0 in the database schema if omitted.
 ///     </para>
 /// 
 ///     <para>
@@ -36,6 +36,6 @@ public sealed record OutboxMessage(
     byte[] Payload,
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
-    short EventOrdinal,
+    int EventOrdinal,
     int RetryCount,
     DateTimeOffset CreatedAtUtc);
