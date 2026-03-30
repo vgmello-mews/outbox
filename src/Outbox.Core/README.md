@@ -95,7 +95,7 @@ Immutable record representing a message in the outbox.
 | `Payload` | `byte[]` | Raw message bytes |
 | `PayloadContentType` | `string` | MIME type (e.g., `application/json`) |
 | `EventDateTimeUtc` | `DateTimeOffset` | Primary ordering key |
-| `EventOrdinal` | `short` | Tie-breaker within same timestamp |
+| `EventOrdinal` | `int` | Tie-breaker within same timestamp |
 | `RetryCount` | `int` | Delivery attempts so far |
 | `CreatedAtUtc` | `DateTimeOffset` | Row insertion time |
 
