@@ -128,14 +128,15 @@ public sealed class PerformanceFixture : IAsyncLifetime
             await PerfReportWriter.WriteMarkdownReportAsync(bulkCopy, sustainedCopy, reportsDir);
         }
 
-        await Task.WhenAll(
-            _postgres.DisposeAsync().AsTask(),
-            _redpanda.DisposeAsync().AsTask(),
-            _sqlServer.DisposeAsync().AsTask(),
-            _eventHubEmulator.DisposeAsync().AsTask(),
-            _azurite.DisposeAsync().AsTask());
+        var disposeTasks = new List<Task>();
+        if (_postgres is not null) disposeTasks.Add(_postgres.DisposeAsync().AsTask());
+        if (_redpanda is not null) disposeTasks.Add(_redpanda.DisposeAsync().AsTask());
+        if (_sqlServer is not null) disposeTasks.Add(_sqlServer.DisposeAsync().AsTask());
+        if (_eventHubEmulator is not null) disposeTasks.Add(_eventHubEmulator.DisposeAsync().AsTask());
+        if (_azurite is not null) disposeTasks.Add(_azurite.DisposeAsync().AsTask());
+        await Task.WhenAll(disposeTasks);
 
-        await _eventHubNetwork.DisposeAsync();
+        if (_eventHubNetwork is not null) await _eventHubNetwork.DisposeAsync();
     }
 
     private static string FindReportsDir()

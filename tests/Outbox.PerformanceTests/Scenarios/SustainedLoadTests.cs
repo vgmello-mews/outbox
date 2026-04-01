@@ -39,92 +39,98 @@ public class SustainedLoadTests
 
         // Start publishers
         var hosts = new List<IHost>();
-        for (var i = 0; i < combo.PublisherCount; i++)
+        try
         {
-            var host = PublisherHostBuilder.Build(
-                combo,
-                _fixture.PostgreSqlConnectionString,
-                _fixture.SqlServerConnectionString,
-                _fixture.BootstrapServers,
-                _fixture.EventHubConnectionString);
-            hosts.Add(host);
-        }
-
-        foreach (var host in hosts)
-            await host.StartAsync();
-
-        // Wait for stabilization if multi-publisher
-        if (combo.PublisherCount > 1)
-        {
-            _output.WriteLine($"[Sustained] {combo.Label}: Waiting {StabilizationDelayMs}ms for rebalancing...");
-            await Task.Delay(StabilizationDelayMs);
-        }
-
-        // Start sustained producer
-        using var producerCts = new CancellationTokenSource(TestDuration);
-        var producerTask = MessageProducer.ProduceAtRateAsync(
-            combo.Store, storeConnStr, TargetRate, producerCts.Token);
-
-        // Monitor progress
-        var sw = Stopwatch.StartNew();
-        var lastLog = Stopwatch.StartNew();
-        long peakPending = 0;
-
-        while (sw.Elapsed < TestDuration)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(5));
-
-            var pending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
-            if (pending > peakPending) peakPending = pending;
-
-            if (lastLog.Elapsed > TimeSpan.FromSeconds(15))
+            for (var i = 0; i < combo.PublisherCount; i++)
             {
-                _output.WriteLine($"[Sustained] {combo.Label}: pending={pending:N0} peak={peakPending:N0} " +
-                                  $"published={metrics.GetCounter("outbox.messages.published"):N0} " +
-                                  $"elapsed={sw.Elapsed:mm\\:ss}");
-                lastLog.Restart();
+                var host = PublisherHostBuilder.Build(
+                    combo,
+                    _fixture.PostgreSqlConnectionString,
+                    _fixture.SqlServerConnectionString,
+                    _fixture.BootstrapServers,
+                    _fixture.EventHubConnectionString);
+                hosts.Add(host);
             }
-        }
 
-        // Wait for producer to finish
+            foreach (var host in hosts)
+                await host.StartAsync();
+
+            // Wait for stabilization if multi-publisher
+            if (combo.PublisherCount > 1)
+            {
+                _output.WriteLine($"[Sustained] {combo.Label}: Waiting {StabilizationDelayMs}ms for rebalancing...");
+                await Task.Delay(StabilizationDelayMs);
+            }
+
+            // Start sustained producer
+            using var producerCts = new CancellationTokenSource(TestDuration);
+            var producerTask = MessageProducer.ProduceAtRateAsync(
+                combo.Store, storeConnStr, TargetRate, producerCts.Token);
+
+            // Monitor progress
+            var sw = Stopwatch.StartNew();
+            var lastLog = Stopwatch.StartNew();
+            long peakPending = 0;
+
+            while (sw.Elapsed < TestDuration)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5));
+
+                var pending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
+                if (pending > peakPending) peakPending = pending;
+
+                if (lastLog.Elapsed > TimeSpan.FromSeconds(15))
+                {
+                    _output.WriteLine($"[Sustained] {combo.Label}: pending={pending:N0} peak={peakPending:N0} " +
+                                      $"published={metrics.GetCounter("outbox.messages.published"):N0} " +
+                                      $"elapsed={sw.Elapsed:mm\\:ss}");
+                    lastLog.Restart();
+                }
+            }
+
+            // Wait for producer to finish
 #pragma warning disable S108 // Empty catch is intentional — cancellation is expected here
-        try { await producerTask; }
-        catch (OperationCanceledException) { }
+            try { await producerTask; }
+            catch (OperationCanceledException) { }
 #pragma warning restore S108
 
-        // Give publishers a few seconds to drain remaining
-        await Task.Delay(TimeSpan.FromSeconds(10));
+            // Give publishers a few seconds to drain remaining
+            await Task.Delay(TimeSpan.FromSeconds(10));
 
-        var finalPending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
-        if (finalPending > peakPending) peakPending = finalPending;
+            var finalPending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
+            if (finalPending > peakPending) peakPending = finalPending;
 
-        // Stop publishers
-        foreach (var host in hosts)
-            await host.StopAsync(TimeSpan.FromSeconds(10));
-        foreach (var host in hosts)
-            host.Dispose();
+            // Calculate drain rate
+            var totalPublished = metrics.GetCounter("outbox.messages.published");
+            var avgDrainRate = totalPublished / TestDuration.TotalSeconds;
 
-        // Calculate drain rate
-        var totalPublished = metrics.GetCounter("outbox.messages.published");
-        var avgDrainRate = totalPublished / TestDuration.TotalSeconds;
+            // Collect results
+            var result = new SustainedResult(
+                combo,
+                TargetRate,
+                TestDuration,
+                avgDrainRate,
+                peakPending,
+                finalPending,
+                metrics.GetHistogramStats("outbox.poll.duration"),
+                metrics.GetHistogramStats("outbox.publish.duration"),
+                metrics.GetPendingSnapshots());
 
-        // Collect results
-        var result = new SustainedResult(
-            combo,
-            TargetRate,
-            TestDuration,
-            avgDrainRate,
-            peakPending,
-            finalPending,
-            metrics.GetHistogramStats("outbox.poll.duration"),
-            metrics.GetHistogramStats("outbox.publish.duration"),
-            metrics.GetPendingSnapshots());
+            PerfReportWriter.WriteSustainedToConsole(result, _output);
 
-        PerfReportWriter.WriteSustainedToConsole(result, _output);
+            // Verify at least some messages were published during the sustained run
+            Assert.True(totalPublished > 0, "Expected at least one message to be published during sustained load test");
 
-        // Verify at least some messages were published during the sustained run
-        Assert.True(totalPublished > 0, "Expected at least one message to be published during sustained load test");
-
-        _fixture.AddSustainedResult(result);
+            _fixture.AddSustainedResult(result);
+        }
+        finally
+        {
+            foreach (var host in hosts)
+            {
+                try { await host.StopAsync(TimeSpan.FromSeconds(5)); }
+                catch { /* best effort */ }
+                host.Dispose();
+            }
+        }
     }
 }

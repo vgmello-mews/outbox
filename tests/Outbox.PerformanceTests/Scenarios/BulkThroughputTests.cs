@@ -49,75 +49,81 @@ public class BulkThroughputTests
 
         // Start publishers
         var hosts = new List<IHost>();
-        for (var i = 0; i < combo.PublisherCount; i++)
+        try
         {
-            var host = PublisherHostBuilder.Build(
-                combo,
-                _fixture.PostgreSqlConnectionString,
-                _fixture.SqlServerConnectionString,
-                _fixture.BootstrapServers,
-                _fixture.EventHubConnectionString);
-            hosts.Add(host);
-        }
-
-        var sw = Stopwatch.StartNew();
-
-        // Start all publisher hosts
-        foreach (var host in hosts)
-            await host.StartAsync();
-
-        // Wait for stabilization (partition rebalancing) if multi-publisher
-        if (combo.PublisherCount > 1)
-        {
-            _output.WriteLine($"[Bulk] {combo.Label}: Waiting {StabilizationDelayMs}ms for rebalancing...");
-            await Task.Delay(StabilizationDelayMs);
-        }
-
-        // Wait for all messages to drain
-        var timeout = TimeSpan.FromMinutes(8);
-        var pollInterval = TimeSpan.FromSeconds(2);
-        var lastLog = Stopwatch.StartNew();
-
-        while (sw.Elapsed < timeout)
-        {
-            var pending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
-
-            if (lastLog.Elapsed > TimeSpan.FromSeconds(10))
+            for (var i = 0; i < combo.PublisherCount; i++)
             {
-                var published = TotalMessages - pending;
-                var rate = published / sw.Elapsed.TotalSeconds;
-                _output.WriteLine($"[Bulk] {combo.Label}: {published:N0}/{TotalMessages:N0} " +
-                                  $"({100.0 * published / TotalMessages:F1}%) — {rate:N0} msg/sec");
-                lastLog.Restart();
+                var host = PublisherHostBuilder.Build(
+                    combo,
+                    _fixture.PostgreSqlConnectionString,
+                    _fixture.SqlServerConnectionString,
+                    _fixture.BootstrapServers,
+                    _fixture.EventHubConnectionString);
+                hosts.Add(host);
             }
 
-            if (pending == 0) break;
-            await Task.Delay(pollInterval);
+            var sw = Stopwatch.StartNew();
+
+            // Start all publisher hosts
+            foreach (var host in hosts)
+                await host.StartAsync();
+
+            // Wait for stabilization (partition rebalancing) if multi-publisher
+            if (combo.PublisherCount > 1)
+            {
+                _output.WriteLine($"[Bulk] {combo.Label}: Waiting {StabilizationDelayMs}ms for rebalancing...");
+                await Task.Delay(StabilizationDelayMs);
+            }
+
+            // Wait for all messages to drain
+            var timeout = TimeSpan.FromMinutes(8);
+            var pollInterval = TimeSpan.FromSeconds(2);
+            var lastLog = Stopwatch.StartNew();
+
+            while (sw.Elapsed < timeout)
+            {
+                var pending = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
+
+                if (lastLog.Elapsed > TimeSpan.FromSeconds(10))
+                {
+                    var published = TotalMessages - pending;
+                    var rate = published / sw.Elapsed.TotalSeconds;
+                    _output.WriteLine($"[Bulk] {combo.Label}: {published:N0}/{TotalMessages:N0} " +
+                                      $"({100.0 * published / TotalMessages:F1}%) — {rate:N0} msg/sec");
+                    lastLog.Restart();
+                }
+
+                if (pending == 0) break;
+                await Task.Delay(pollInterval);
+            }
+
+            sw.Stop();
+
+            // Verify drain
+            var remaining = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
+            Assert.Equal(0, remaining);
+
+            // Collect results
+            var result = new BulkResult(
+                combo,
+                TotalMessages,
+                sw.Elapsed,
+                metrics.GetHistogramStats("outbox.poll.duration"),
+                metrics.GetHistogramStats("outbox.publish.duration"),
+                metrics.GetHistogramStats("outbox.poll.batch_size"));
+
+            PerfReportWriter.WriteBulkToConsole(result, _output);
+
+            _fixture.AddBulkResult(result);
         }
-
-        sw.Stop();
-
-        // Stop publishers
-        foreach (var host in hosts)
-            await host.StopAsync(TimeSpan.FromSeconds(10));
-        foreach (var host in hosts)
-            host.Dispose();
-
-        // Verify drain
-        var remaining = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
-        Assert.Equal(0, remaining);
-
-        // Collect results
-        var result = new BulkResult(
-            combo,
-            TotalMessages,
-            sw.Elapsed,
-            metrics.GetHistogramStats("outbox.poll.duration"),
-            metrics.GetHistogramStats("outbox.publish.duration"),
-            metrics.GetHistogramStats("outbox.poll.batch_size"));
-
-        PerfReportWriter.WriteBulkToConsole(result, _output);
-
-        _fixture.AddBulkResult(result);
+        finally
+        {
+            foreach (var host in hosts)
+            {
+                try { await host.StopAsync(TimeSpan.FromSeconds(5)); }
+                catch { /* best effort */ }
+                host.Dispose();
+            }
+        }
     }
 }
