@@ -196,7 +196,7 @@ The primary event buffer. Messages are inserted here inside the same transaction
 | ------------------- | ------------------------------------------------ | ----------------------------------------------- |
 | `ix_outbox_pending` | `(event_datetime_utc, event_ordinal)` + includes | Fast lookup of pending messages in causal order |
 
-A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table.
+A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table. On SQL Server, the INCLUDE columns contain all SELECT columns (including `Headers`, `Payload`, `PayloadContentType`) to form a covering index that eliminates key lookups to the clustered index. PostgreSQL's index includes only the smaller columns.
 
 ### outbox_dead_letter
 

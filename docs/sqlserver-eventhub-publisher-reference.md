@@ -111,7 +111,7 @@ SELECT TOP (@BatchSize)
     o.Headers, o.Payload, o.PayloadContentType,
     o.EventDateTimeUtc, o.EventOrdinal,
     o.RetryCount, o.CreatedAtUtc
-FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+FROM dbo.Outbox o
 INNER JOIN dbo.OutboxPartitions op
     ON  op.OutboxTableName = @OutboxTableName
     AND op.OwnerPublisherId = @PublisherId
@@ -134,13 +134,14 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 
 | Filter                                              | Purpose                                                            |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
-| `ROWLOCK, READPAST`                                 | Skip rows locked by other transactions                             |
 | `op.OwnerPublisherId = @PublisherId`                | Only fetch from partitions this publisher owns                     |
 | `op.GraceExpiresUtc IS NULL OR < NOW`               | Don't fetch from partitions still in grace period                  |
 | `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment                                    |
 | `RowVersion < MIN_ACTIVE_ROWVERSION()`              | Version ceiling — withholds rows from in-flight write transactions |
 | `RetryCount < @MaxRetryCount`                       | Skip poison messages (handled separately)                          |
 | `ORDER BY EventDateTimeUtc, EventOrdinal`           | Strict ordering within a partition key                             |
+
+**No row locking:** The query uses no lock hints (`ROWLOCK`, `READPAST`, etc.). Partition ownership is the sole isolation mechanism — each publisher only fetches from its owned partitions, so there is no risk of two publishers reading the same rows. This avoids lock manager overhead, which is the dominant performance cost on SQL Server.
 
 **Version ceiling:** The `RowVersion < MIN_ACTIVE_ROWVERSION()` filter prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 
