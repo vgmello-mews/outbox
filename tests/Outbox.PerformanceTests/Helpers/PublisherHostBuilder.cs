@@ -86,6 +86,8 @@ public static class PublisherHostBuilder
                 outbox.UseEventHub(options =>
                 {
                     options.ConnectionString = eventHubConnectionString;
+                    // Emulator AMQP initialization is slow — increase from 15s default
+                    options.SendTimeoutSeconds = 120;
                 });
                 break;
         }

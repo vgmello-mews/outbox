@@ -10,7 +10,9 @@ namespace Outbox.PerformanceTests.Scenarios;
 [Collection(PerformanceCollection.Name)]
 public class SustainedLoadTests
 {
-    private const int TargetRate = 1_000; // messages per second
+    // PostgreSQL can handle 1K/sec; SQL Server (Azure SQL Edge on ARM) needs a lower target
+    private const int PostgreSqlTargetRate = 1_000;
+    private const int SqlServerTargetRate = 100;
     private static readonly TimeSpan TestDuration = TimeSpan.FromMinutes(5);
     private const int StabilizationDelayMs = 15_000;
 
@@ -27,6 +29,7 @@ public class SustainedLoadTests
     [MemberData(nameof(TestMatrix.AllCombinations), MemberType = typeof(TestMatrix))]
     public async Task SustainedRate(TestCombination combo)
     {
+        var targetRate = combo.Store == StoreType.PostgreSql ? PostgreSqlTargetRate : SqlServerTargetRate;
         var storeConnStr = combo.Store == StoreType.PostgreSql
             ? _fixture.PostgreSqlConnectionString
             : _fixture.SqlServerConnectionString;
@@ -65,7 +68,7 @@ public class SustainedLoadTests
             // Start sustained producer
             using var producerCts = new CancellationTokenSource(TestDuration);
             var producerTask = MessageProducer.ProduceAtRateAsync(
-                combo.Store, storeConnStr, TargetRate, producerCts.Token);
+                combo.Store, storeConnStr, targetRate, producerCts.Token);
 
             // Monitor progress
             var sw = Stopwatch.StartNew();
@@ -107,7 +110,7 @@ public class SustainedLoadTests
             // Collect results
             var result = new SustainedResult(
                 combo,
-                TargetRate,
+                targetRate,
                 TestDuration,
                 avgDrainRate,
                 peakPending,

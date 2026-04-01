@@ -10,7 +10,9 @@ namespace Outbox.PerformanceTests.Scenarios;
 [Collection(PerformanceCollection.Name)]
 public class BulkThroughputTests
 {
-    private const int TotalMessages = 1_000_000;
+    // PostgreSQL handles 1M easily; SQL Server (Azure SQL Edge on ARM) is ~60x slower
+    private const int PostgreSqlMessages = 1_000_000;
+    private const int SqlServerMessages = 100_000;
     private const int StabilizationDelayMs = 15_000;
 
     private readonly PerformanceFixture _fixture;
@@ -26,6 +28,7 @@ public class BulkThroughputTests
     [MemberData(nameof(TestMatrix.AllCombinations), MemberType = typeof(TestMatrix))]
     public async Task BulkDrain(TestCombination combo)
     {
+        var totalMessages = combo.Store == StoreType.PostgreSql ? PostgreSqlMessages : SqlServerMessages;
         var storeConnStr = combo.Store == StoreType.PostgreSql
             ? _fixture.PostgreSqlConnectionString
             : _fixture.SqlServerConnectionString;
@@ -34,15 +37,15 @@ public class BulkThroughputTests
         await CleanupHelper.CleanupAsync(combo.Store, storeConnStr);
 
         // Pre-seed messages
-        _output.WriteLine($"[Bulk] {combo.Label}: Seeding {TotalMessages:N0} messages...");
+        _output.WriteLine($"[Bulk] {combo.Label}: Seeding {totalMessages:N0} messages...");
         var seedSw = Stopwatch.StartNew();
-        await MessageProducer.BulkSeedAsync(combo.Store, storeConnStr, TotalMessages);
+        await MessageProducer.BulkSeedAsync(combo.Store, storeConnStr, totalMessages);
         seedSw.Stop();
         _output.WriteLine($"[Bulk] {combo.Label}: Seeding complete in {seedSw.Elapsed:mm\\:ss}");
 
         // Verify seed count
         var seeded = await CleanupHelper.GetPendingCountAsync(combo.Store, storeConnStr);
-        Assert.Equal(TotalMessages, seeded);
+        Assert.Equal(totalMessages, seeded);
 
         // Start metrics collector
         using var metrics = new MetricsCollector();
@@ -86,10 +89,10 @@ public class BulkThroughputTests
 
                 if (lastLog.Elapsed > TimeSpan.FromSeconds(10))
                 {
-                    var published = TotalMessages - pending;
+                    var published = totalMessages - pending;
                     var rate = published / sw.Elapsed.TotalSeconds;
-                    _output.WriteLine($"[Bulk] {combo.Label}: {published:N0}/{TotalMessages:N0} " +
-                                      $"({100.0 * published / TotalMessages:F1}%) — {rate:N0} msg/sec");
+                    _output.WriteLine($"[Bulk] {combo.Label}: {published:N0}/{totalMessages:N0} " +
+                                      $"({100.0 * published / totalMessages:F1}%) — {rate:N0} msg/sec");
                     lastLog.Restart();
                 }
 
@@ -106,7 +109,7 @@ public class BulkThroughputTests
             // Collect results
             var result = new BulkResult(
                 combo,
-                TotalMessages,
+                totalMessages,
                 sw.Elapsed,
                 metrics.GetHistogramStats("outbox.poll.duration"),
                 metrics.GetHistogramStats("outbox.publish.duration"),
