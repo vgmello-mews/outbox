@@ -33,6 +33,13 @@ public class BrokerDownTests
         {
             await host.StartAsync();
 
+            // Wait for publisher to register and claim partitions (rebalance loop delays 3s before first action)
+            await OutboxTestHelper.WaitUntilAsync(async () =>
+            {
+                var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
+                return owners.Values.Any(v => v != null);
+            }, TimeSpan.FromSeconds(10), message: "Publisher should claim partitions");
+
             // Phase 1: Publish some messages successfully
             await OutboxTestHelper.InsertMessagesAsync(_infra.ConnectionString, 10, topic, "key-1");
             await OutboxTestHelper.WaitUntilAsync(
@@ -94,6 +101,13 @@ public class BrokerDownTests
         try
         {
             await host.StartAsync();
+
+            // Wait for publisher to register and claim partitions (rebalance loop delays 3s before first action)
+            await OutboxTestHelper.WaitUntilAsync(async () =>
+            {
+                var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
+                return owners.Values.Any(v => v != null);
+            }, TimeSpan.FromSeconds(10), message: "Publisher should claim partitions");
 
             // Block broker only (DB stays up)
             transport.SetFailing(true);

@@ -34,7 +34,7 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** Health check returns `Degraded` with open circuit breaker topics listed
 6. Continue inserting 200 more messages over the next 60 seconds
 7. **Assert:** Messages remain in outbox table (`SELECT COUNT(*) FROM outbox` = ~300)
-8. **Assert:** Retry counts on messages are being incremented (transport failure path)
+8. **Assert:** Retry counts on messages are being incremented via `IncrementRetryCountAsync` (transport failure path)
 9. Wait 30 seconds (circuit breaker `OpenDurationSeconds`)
 10. **Assert:** Circuit transitions to HalfOpen, one probe batch is attempted, fails, re-opens
 11. **Restore broker connectivity**
@@ -82,7 +82,7 @@ This document defines all failure/error scenarios that must be validated through
 9. **Assert:** Publishers resume heartbeats, health check returns to `Healthy`
 10. **Assert:** Rebalance re-establishes partition ownership
 11. **Assert:** Remaining unprocessed messages are eventually published
-12. **Assert:** No duplicate messages (messages that were leased but not sent before DB went down should be retried exactly once after recovery)
+12. **Assert:** No duplicate messages (messages that were fetched but not sent before DB went down should be retried on recovery)
 13. **Assert:** Both publishers have partitions assigned (verify via `outbox_partitions` table)
 
 **What can go wrong in production:**
@@ -101,7 +101,7 @@ This document defines all failure/error scenarios that must be validated through
 
 ## Scenario 3: Process Kill Mid-Batch (SIGKILL / OOM Kill)
 
-**What we're testing:** When a publisher is killed mid-send (no graceful shutdown), in-flight leases expire, surviving publishers claim orphaned partitions, and messages are redelivered.
+**What we're testing:** When a publisher is killed mid-send (no graceful shutdown), surviving publishers claim orphaned partitions and messages are redelivered.
 
 **Setup:**
 
@@ -118,10 +118,8 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** Publisher B's rebalance marks A's partitions with grace period
 6. Wait `PartitionGracePeriodSeconds` (60s) — grace period expires
 7. **Assert:** Publisher B claims A's orphaned partitions via rebalance or orphan sweep
-8. Wait `LeaseDurationSeconds` (45s) — A's in-flight leases expire
-9. **Assert:** Messages that were leased by A are now re-leased by B
-10. **Assert:** Retry count incremented for those messages (lease expired, not explicitly released)
-11. **Assert:** ALL messages eventually published to consumer
+8. **Assert:** Messages from A's partitions are now fetched and processed by B
+9. **Assert:** ALL messages eventually published to consumer
 12. **Assert:** Some messages may be duplicated (sent by A before kill, then re-sent by B) — consumer must handle this
 13. **Assert:** After stabilization, outbox table is empty
 
@@ -129,7 +127,7 @@ This document defines all failure/error scenarios that must be validated through
 
 - Record timestamp of SIGKILL
 - Record timestamp of last message delivered to consumer
-- Expected: ≤ `HeartbeatTimeout + GracePeriod + LeaseExpiry + RebalanceInterval` = ~165 seconds worst case
+- Expected: ≤ `HeartbeatTimeout + GracePeriod + RebalanceInterval` = ~120 seconds worst case
 
 **Runbook actions:**
 
@@ -141,28 +139,26 @@ This document defines all failure/error scenarios that must be validated through
 
 ## Scenario 4: Graceful Shutdown (SIGTERM / Deployment)
 
-**What we're testing:** On graceful shutdown, in-flight leases are released immediately (not waiting for lease expiry), reducing message processing delay.
+**What we're testing:** On graceful shutdown, partition ownership is released immediately, allowing a new publisher to pick up messages without delay.
 
 **Setup:**
 
 1. Start a publisher instance
-2. Configure `LeaseDurationSeconds = 120` (long lease to make the test clear)
-3. Insert 100 messages
+2. Insert 100 messages
 
 **Test steps:**
 
-1. Wait for publisher to begin processing (at least one batch leased)
+1. Wait for publisher to begin processing (at least one batch fetched)
 2. **Send SIGTERM** (graceful shutdown via `StopAsync`)
-3. **Assert:** The `PublishLoopAsync` `finally` block releases in-flight leased messages via `ReleaseLeaseAsync(..., incrementRetry: false, CancellationToken.None)` (leased_until_utc = NULL)
-4. **Assert:** `UnregisterPublisherAsync` is called (releases partition ownership, not message leases — that happened in step 3)
-5. Immediately start a new publisher instance
-6. **Assert:** The new publisher can lease and process the previously in-flight messages within seconds (not waiting 120s for lease expiry)
-7. **Assert:** All messages eventually published
+3. **Assert:** `UnregisterPublisherAsync` is called (releases partition ownership)
+4. Immediately start a new publisher instance
+5. **Assert:** The new publisher claims partitions and processes remaining messages within seconds
+6. **Assert:** All messages eventually published
 
 **Timing verification:**
 
-- After SIGTERM, measure time until previously-leased messages are re-processed
-- Should be < 10 seconds (rebalance + poll interval), NOT 120 seconds (lease expiry)
+- After SIGTERM, measure time until remaining messages are processed
+- Should be < 10 seconds (rebalance + poll interval)
 
 ---
 
@@ -180,9 +176,9 @@ This document defines all failure/error scenarios that must be validated through
 
 1. Wait for publisher to attempt sending the oversized message
 2. **Assert:** `SendAsync` throws `InvalidOperationException: Message too large`
-3. **Assert:** `ReleaseLeaseAsync` called with `incrementRetry: true`
-4. **Assert:** After 3 failures, message's `retry_count` = 3 (incremented on each explicit release)
-5. **Assert:** `LeaseBatchAsync` no longer returns this message (SQL filter: `retry_count < @max_retry_count`)
+3. **Assert:** `IncrementRetryCountAsync` called for the failed message
+4. **Assert:** After 3 failures, message's `retry_count` = 3 (incremented on each transport failure)
+5. **Assert:** `FetchBatchAsync` no longer returns this message (SQL filter: `retry_count < @max_retry_count`)
 6. **Assert:** `DeadLetterSweepLoopAsync` picks up the message and calls `SweepDeadLettersAsync`, which moves it to `outbox_dead_letter` table
 7. **Assert:** `outbox.messages.dead_lettered` metric incremented
 8. **Assert:** The 5 normal messages are published successfully (not blocked by the poison message)
@@ -190,8 +186,8 @@ This document defines all failure/error scenarios that must be validated through
 
 **Verify no infinite retry:**
 
-- Track `retry_count` after each lease-release cycle
-- Must increment by 1 each time (because `incrementRetry: true`)
+- Track `retry_count` after each transport failure
+- Must increment by 1 each time (via `IncrementRetryCountAsync`)
 
 ---
 
@@ -207,7 +203,7 @@ This document defines all failure/error scenarios that must be validated through
 
 **Test steps:**
 
-1. **Assert:** Each failed send increments `retry_count` via `ReleaseLeaseAsync(incrementRetry: true)`
+1. **Assert:** Each failed send increments `retry_count` via `IncrementRetryCountAsync`
 2. **Assert:** Each successful send resets the circuit breaker failure count (but does NOT reset `retry_count` — that only resets on replay from dead letter)
 3. **Assert:** Messages that succeed are deleted from outbox
 4. **Assert:** Messages that accumulate `retry_count >= 5` are dead-lettered
@@ -219,7 +215,7 @@ This document defines all failure/error scenarios that must be validated through
 
 ## Scenario 7: Circuit Breaker Does NOT Burn Retry Counts
 
-**What we're testing:** When the circuit breaker is open, messages are released WITHOUT incrementing retry count. This prevents messages from being dead-lettered due to broker outage (not message-level failure).
+**What we're testing:** When the circuit breaker is open, messages are skipped (left in the outbox) WITHOUT incrementing retry count. This prevents messages from being dead-lettered due to broker outage (not message-level failure).
 
 **Setup:**
 
@@ -230,8 +226,8 @@ This document defines all failure/error scenarios that must be validated through
 **Test steps:**
 
 1. Wait for 2 consecutive failures → circuit opens
-2. **Assert:** Subsequent leases are immediately released with `incrementRetry: false`
-3. **Assert:** `retry_count` stays at value from before circuit opened (incremented only during actual send attempts, not during circuit-open releases)
+2. **Assert:** Subsequent fetches for that topic are skipped—messages stay in the outbox untouched
+3. **Assert:** `retry_count` stays at value from before circuit opened (incremented only during actual send attempts, not during circuit-open skips)
 4. Wait for circuit to half-open, then make broker available
 5. **Assert:** Messages sent successfully with `retry_count` ≤ 2 (from the initial failures before circuit opened)
 6. **Assert:** Messages are NOT dead-lettered (retry count did not reach `MaxRetryCount`)
@@ -266,7 +262,7 @@ This document defines all failure/error scenarios that must be validated through
 2. Wait for rebalance
 3. **Assert:** C's partitions distributed to A and B (16/16)
 4. **Assert:** No message loss during C's shutdown
-5. **Assert:** Messages that C had leased are released on graceful shutdown
+5. **Assert:** C's partitions are released on graceful shutdown
 
 **Grace period verification:**
 
@@ -462,7 +458,7 @@ The following scenarios are covered by unit tests in `OutboxPublisherServiceTest
 1. **`OnMessagePublishedAsync` throws after successful send:** Retry count must NOT be incremented. Delete must still proceed. Circuit breaker must NOT record a failure.
 2. **`OnCircuitBreakerStateChangedAsync` throws after circuit recovery:** Same invariant — transport succeeded, handler failure is irrelevant.
 3. **`OnMessageDeadLetteredAsync` throws with healthy messages in batch:** Healthy messages must still be sent to the transport (not blocked by poison handler failure).
-4. **`OnMessageDeadLetteredAsync` throws:** Healthy messages must be processed or released, not stuck until lease expiry.
+4. **`OnMessageDeadLetteredAsync` throws:** Healthy messages must still be processed normally.
 
 ---
 

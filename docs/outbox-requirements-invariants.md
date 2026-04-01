@@ -59,8 +59,8 @@ This document captures the critical invariants, behavioral requirements, and arc
 
 ### Event handler isolation
 
-- Exceptions thrown by `IOutboxEventHandler` callbacks (`OnMessagePublishedAsync`, `OnPublishFailedAsync`, `OnCircuitBreakerStateChangedAsync`, `OnMessageDeadLetteredAsync`) MUST NOT trigger additional cleanup (lease release, dead-lettering, retry increment).
-- By the time a handler is called, the message's fate (deleted, released, dead-lettered) is already finalized.
+- Exceptions thrown by `IOutboxEventHandler` callbacks (`OnMessagePublishedAsync`, `OnPublishFailedAsync`, `OnCircuitBreakerStateChangedAsync`, `OnMessageDeadLetteredAsync`) MUST NOT trigger additional cleanup (dead-lettering, retry increment).
+- By the time a handler is called, the message's fate (deleted, retried, dead-lettered) is already finalized.
 - Each handler call MUST be wrapped in its own `try/catch` that logs and continues. Handler exceptions MUST NOT fall through to transport-failure catch blocks (which would incorrectly increment retry counts or record circuit breaker failures).
 - Handler exceptions for poison messages (`OnMessageDeadLetteredAsync`) MUST NOT prevent healthy messages in the same batch from being processed.
 
@@ -143,5 +143,5 @@ Any store implementation MUST satisfy:
 5. **Catch-all without logging.** Every `catch (Exception)` must log. Silent swallowing hides production issues.
 6. **DI singleton disposal in transport.** Transports must NOT dispose injected producers/clients in `DisposeAsync`.
 7. **Catching generic Exception before PartialSendException.** `PartialSendException` MUST be caught before generic `Exception` in the publish loop. A generic handler would call `IncrementRetryCountAsync` for ALL messages, incorrectly penalizing messages that were already delivered.
-8. **Re-releasing messages from event handler failures.** When `OnMessagePublishedAsync` or other handlers throw, do NOT re-release or retry the messages — their fate is already finalized. Each handler call must be individually try/caught to prevent fallthrough to transport-failure handlers.
+8. **Re-processing messages from event handler failures.** When `OnMessagePublishedAsync` or other handlers throw, do NOT retry or re-process the messages — their fate is already finalized. Each handler call must be individually try/caught to prevent fallthrough to transport-failure handlers.
 9. **Letting poison message handler exceptions block healthy messages.** `OnMessageDeadLetteredAsync` runs before healthy message processing. If it throws unhandled, the entire healthy batch is skipped and stuck with a spurious retry count increment.

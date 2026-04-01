@@ -22,11 +22,11 @@ Run `db_scripts/install.sql` against your database to create the schema. The scr
 
 ## Schema
 
-Four tables, three indexes, two diagnostic views, and a 64-partition seed:
+Four tables, one index, two diagnostic views, and a 64-partition seed:
 
 | Table | Purpose |
 |---|---|
-| `outbox` | Primary event buffer with lease columns |
+| `outbox` | Primary event buffer |
 | `outbox_dead_letter` | Messages past `MaxRetryCount` |
 | `outbox_publishers` | Heartbeat registry |
 | `outbox_partitions` | Partition-to-publisher ownership map |
@@ -39,15 +39,13 @@ Four tables, three indexes, two diagnostic views, and a 64-partition seed:
 | `topic_name` | `VARCHAR(256)` | Broker topic |
 | `partition_key` | `VARCHAR(256)` | Hash input for partition assignment |
 | `payload` | `BYTEA` | Raw message bytes |
-| `leased_until_utc` | `TIMESTAMPTZ(3)` | NULL = available |
-| `lease_owner` | `VARCHAR(128)` | Publisher holding the lease |
+| `headers` | `VARCHAR(2000)` | JSON-serialized headers (nullable) |
+| `event_ordinal` | `INT` | Tiebreaker for same-timestamp events |
 | `retry_count` | `INT` | Delivery attempts |
 
 ### Indexes
 
-- `ix_outbox_unleased` — Partial on `(event_datetime_utc, event_ordinal)` where `leased_until_utc IS NULL`
-- `ix_outbox_lease_expiry` — Partial on `(leased_until_utc, event_datetime_utc, event_ordinal)` where `leased_until_utc IS NOT NULL`
-- `ix_outbox_sweep` — On `(retry_count, lease_owner)` for dead-letter sweep
+- `ix_outbox_pending` — On `(event_datetime_utc, event_ordinal)` for causal-order polling
 
 ### Diagnostic views
 
@@ -63,11 +61,15 @@ Four tables, three indexes, two diagnostic views, and a 64-partition seed:
 
 `hashtext()` is PostgreSQL's built-in FNV-based 32-bit hash. The `& 2147483647` masks the sign bit. This produces different partition assignments than SQL Server's `CHECKSUM()`—cross-provider migration would require rehashing.
 
-### Lease mechanism
+### Fetch mechanism
 
-`LeaseBatchAsync` uses a CTE with `FOR UPDATE SKIP LOCKED` to atomically select and stamp messages. The retry count is incremented only when re-leasing a previously-leased row (first-time leases don't consume a retry slot).
+`FetchBatchAsync` is a pure `SELECT` — no row locking or updating. It reads messages from owned partitions ordered by `(event_datetime_utc, event_ordinal)` with a version ceiling filter:
 
-All mutating operations check `lease_owner = @publisher_id` to prevent zombie publishers from affecting rows they no longer own.
+```sql
+WHERE o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
+```
+
+This withholds rows from in-flight write transactions, preventing the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Partition ownership is the sole isolation mechanism — there are no per-message leases.
 
 ### Dead-lettering
 

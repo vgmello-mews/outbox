@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
     created_at_utc       TIMESTAMPTZ(3) NOT NULL,
     retry_count          INT            NOT NULL,
     event_datetime_utc   TIMESTAMPTZ(3) NOT NULL,
-    event_ordinal        SMALLINT       NOT NULL DEFAULT 0,
+    event_ordinal        INT            NOT NULL DEFAULT 0,
     payload_content_type VARCHAR(100)   NOT NULL DEFAULT 'application/json',
     dead_lettered_at_utc TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     last_error           VARCHAR(2000)  NULL,

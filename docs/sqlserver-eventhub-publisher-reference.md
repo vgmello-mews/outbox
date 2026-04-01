@@ -9,8 +9,7 @@ Before diving in, here are the options that drive the timings referenced through
 | Option | Default | Used by |
 |--------|---------|---------|
 | `PublisherName` | `outbox-publisher` | Publisher ID generation |
-| `BatchSize` | 100 | Lease query `TOP` |
-| `LeaseDurationSeconds` | 45 | Lease expiry on messages |
+| `BatchSize` | 100 | Fetch query `TOP` |
 | `MaxRetryCount` | 5 | Poison threshold |
 | `MinPollIntervalMs` | 100 | Publish loop (busy) |
 | `MaxPollIntervalMs` | 5000 | Publish loop (idle) |
@@ -101,59 +100,47 @@ SELECT COUNT(*) FROM dbo.OutboxPartitions;
 
 If the count is 0, the publisher skips leasing and waits.
 
-### 2.2 Lease a batch
+### 2.2 Fetch a batch
 
-This is the most complex query. It atomically selects and locks messages in a single `UPDATE...OUTPUT` statement:
+A pure `SELECT` that reads messages from owned partitions without locking or updating rows:
 
 ```sql
-WITH Batch AS
-(
-    SELECT TOP (@BatchSize)
-        o.SequenceNumber, o.TopicName, o.PartitionKey,
-        o.EventType, o.Headers, o.Payload,
-        o.PayloadContentType, o.EventDateTimeUtc, o.EventOrdinal,
-        o.LeasedUntilUtc, o.LeaseOwner, o.RetryCount, o.CreatedAtUtc
-    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-    INNER JOIN dbo.OutboxPartitions op
-        ON  op.OwnerPublisherId = @PublisherId
-        AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-        AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
-    WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
-      AND o.RetryCount < @MaxRetryCount
-    ORDER BY o.EventDateTimeUtc, o.EventOrdinal
-)
-UPDATE Batch
-SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
-       LeaseOwner     = @PublisherId,
-       RetryCount     = CASE WHEN LeasedUntilUtc IS NOT NULL
-                              THEN RetryCount + 1
-                              ELSE RetryCount END
-OUTPUT inserted.SequenceNumber, inserted.TopicName, inserted.PartitionKey,
-       inserted.EventType, inserted.Headers, inserted.Payload,
-       inserted.PayloadContentType, inserted.EventDateTimeUtc,
-       inserted.EventOrdinal, inserted.RetryCount, inserted.CreatedAtUtc;
+SELECT TOP (@BatchSize)
+    o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
+    o.Headers, o.Payload, o.PayloadContentType,
+    o.EventDateTimeUtc, o.EventOrdinal,
+    o.RetryCount, o.CreatedAtUtc
+FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+INNER JOIN dbo.OutboxPartitions op
+    ON  op.OutboxTableName = @OutboxTableName
+    AND op.OwnerPublisherId = @PublisherId
+    AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+    AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
+WHERE o.RetryCount < @MaxRetryCount
+  AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
+ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 ```
 
 **Parameters:**
-- `@BatchSize` — max messages to lease (default 100)
-- `@LeaseDurationSeconds` — how long the lease lasts (default 45)
+- `@BatchSize` — max messages to fetch (default 100)
 - `@PublisherId` — this publisher's ID
 - `@TotalPartitions` — cached partition count
 - `@MaxRetryCount` — poison threshold (default 5)
+- `@OutboxTableName` — the outbox table name for this publisher group
 
 **What the filters do:**
 
 | Filter | Purpose |
 |--------|---------|
-| `ROWLOCK, READPAST` | Row-level locking; skip rows locked by other transactions |
-| `op.OwnerPublisherId = @PublisherId` | Only lease from partitions this publisher owns |
-| `op.GraceExpiresUtc IS NULL OR < NOW` | Don't lease from partitions still in grace period |
+| `ROWLOCK, READPAST` | Skip rows locked by other transactions |
+| `op.OwnerPublisherId = @PublisherId` | Only fetch from partitions this publisher owns |
+| `op.GraceExpiresUtc IS NULL OR < NOW` | Don't fetch from partitions still in grace period |
 | `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment |
-| `LeasedUntilUtc IS NULL OR < NOW` | Only unleased or expired-lease messages |
+| `RowVersion < MIN_ACTIVE_ROWVERSION()` | Version ceiling — withholds rows from in-flight write transactions |
 | `RetryCount < @MaxRetryCount` | Skip poison messages (handled separately) |
 | `ORDER BY EventDateTimeUtc, EventOrdinal` | Strict ordering within a partition key |
 
-**Retry count logic:** The retry count is only incremented if the message was previously leased (`LeasedUntilUtc IS NOT NULL`). Fresh messages get their first lease without a retry bump.
+**Version ceiling:** The `RowVersion < MIN_ACTIVE_ROWVERSION()` filter prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 
 ### 2.3 Adaptive polling
 
@@ -169,18 +156,9 @@ Healthy messages are grouped by `(TopicName, PartitionKey)`. Each group is proce
 
 ### 2.6 Check circuit breaker
 
-If the circuit breaker is **open** for a topic, messages are released without incrementing the retry count:
+If the circuit breaker is **open** for a topic, the group is skipped entirely. Messages stay in the outbox untouched — no retry count increment, no database write. They'll be picked up on the next poll once the circuit closes.
 
-```sql
-UPDATE o
-SET    o.LeasedUntilUtc = NULL,
-       o.LeaseOwner     = NULL
-FROM   dbo.Outbox o
-INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-WHERE  o.LeaseOwner = @PublisherId;
-```
-
-This prevents retry-count exhaustion during broker outages. The messages become available for the next poll once the circuit closes.
+This prevents retry-count exhaustion during broker outages.
 
 ### 2.7 Apply interceptors
 
@@ -236,49 +214,32 @@ Three possible outcomes:
 Delete from the outbox table and record circuit breaker success:
 
 ```sql
-DELETE o
-FROM   dbo.Outbox o
-INNER JOIN @PublishedIds p ON o.SequenceNumber = p.SequenceNumber
-WHERE  o.LeaseOwner = @PublisherId;
+DELETE FROM dbo.Outbox
+WHERE SequenceNumber IN (SELECT SequenceNumber FROM @Ids);
 ```
 
-The `LeaseOwner` check prevents a zombie publisher (one that lost its lease) from deleting messages now owned by another publisher.
-
-If the delete fails (database error), messages are released without retry increment since the transport already succeeded—they'll be re-delivered (at-least-once guarantee):
-
-```sql
-UPDATE o
-SET    o.LeasedUntilUtc = NULL,
-       o.LeaseOwner     = NULL
-FROM   dbo.Outbox o
-INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-WHERE  o.LeaseOwner = @PublisherId;
-```
+If the delete fails (database error), messages remain in the outbox and will be re-delivered on the next poll (at-least-once guarantee). No retry count increment since the transport already succeeded.
 
 **Partial send:**
 
 - Succeeded messages → delete (same query as success)
-- Failed messages → release with retry increment:
+- Failed messages → increment retry count:
 
 ```sql
-UPDATE o
-SET    o.LeasedUntilUtc = NULL,
-       o.LeaseOwner     = NULL,
-       o.RetryCount     = o.RetryCount + 1
-FROM   dbo.Outbox o
-INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-WHERE  o.LeaseOwner = @PublisherId;
+UPDATE o SET o.RetryCount = o.RetryCount + 1
+FROM dbo.Outbox o
+INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
 ```
 
 Circuit breaker records a failure.
 
 **Full failure:**
 
-All messages are released with retry increment (same query as failed messages above). Circuit breaker records a failure.
+All messages get their retry count incremented (same query as failed messages above). Circuit breaker records a failure.
 
-### 2.10 Safety net for cancellation
+### 2.10 No safety net needed
 
-If the loop is cancelled mid-flight (shutdown), a `finally` block releases any leased messages that weren't finalized—without incrementing retry count, using `CancellationToken.None` to ensure the release completes even during shutdown.
+Since there are no per-message leases, cancellation doesn't require cleanup. Partition ownership is the sole isolation mechanism—when the publisher shuts down, `UnregisterPublisherAsync` releases partitions, and unprocessed messages are simply picked up by the next owner.
 
 ---
 
@@ -306,15 +267,14 @@ Both statements run in a single transaction. The second statement clears any gra
 After each heartbeat, the publisher queries the pending message count for observability:
 
 ```sql
-SELECT COUNT_BIG(*) FROM dbo.Outbox
-WHERE  LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME();
+SELECT COUNT_BIG(*) FROM dbo.Outbox;
 ```
 
 This is best-effort—failures are logged at `Debug` level and don't affect the heartbeat.
 
 ### 3.3 Failure handling
 
-If the heartbeat fails three consecutive times, the loop exits. This triggers the restart mechanism—all loops are cancelled and restarted. The rationale: if you can't heartbeat, other publishers will think you're dead and start claiming your partitions. Restarting ensures a clean slate.
+If the heartbeat fails three consecutive times, the loop re-throws the exception. This triggers the restart mechanism—all loops are cancelled via the linked CTS and restarted. The rationale: if you can't heartbeat, other publishers will think you're dead and start claiming your partitions. Restarting ensures a clean slate.
 
 ---
 
@@ -495,31 +455,14 @@ INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
      EventDateTimeUtc, EventOrdinal,
      DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-WHERE o.RetryCount >= @MaxRetryCount
-  AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
-  AND (o.LeaseOwner IS NULL
-       OR o.LeasedUntilUtc < DATEADD(SECOND, -@LeaseDurationSeconds, SYSUTCDATETIME())
-       OR o.LeaseOwner NOT IN (
-           SELECT PublisherId
-           FROM dbo.OutboxPublishers
-           WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
-       ));
+WHERE o.RetryCount >= @MaxRetryCount;
 ```
 
 **Parameters:**
 - `@MaxRetryCount` — poison threshold (default 5)
-- `@HeartbeatTimeoutSeconds` — staleness threshold (default 30)
-- `@LeaseDurationSeconds` — lease duration (default 45)
 - `@LastError` — always `"Max retry count exceeded (background sweep)"`
 
-**Three conditions for sweep eligibility** (must meet all):
-
-1. `RetryCount >= MaxRetryCount` — actually a poison message
-2. Not currently leased (lease expired or null)
-3. **And** one of:
-   - `LeaseOwner IS NULL` — explicitly released
-   - Lease has been expired for longer than `LeaseDurationSeconds` — owner had time to clean up but didn't
-   - Owner is a dead publisher (stale heartbeat)
+The condition is simple: any message with `RetryCount >= MaxRetryCount` is swept. Since there are no lease columns, partition ownership ensures only the owning publisher processes its messages.
 
 The `DELETE...OUTPUT INTO` is atomic—the message is moved from `Outbox` to `OutboxDeadLetter` in a single statement.
 
@@ -543,12 +486,10 @@ INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
      EventDateTimeUtc, EventOrdinal,
      DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o
-INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-WHERE o.LeaseOwner = @PublisherId;
+INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
 ```
 
 **Parameters:**
-- `@PublisherId` — this publisher's ID
 - `@Ids` — table-valued parameter (`dbo.SequenceNumberList`) containing the poison message sequence numbers
 - `@LastError` — `"Max retry count exceeded"`
 
@@ -562,7 +503,7 @@ When the host signals cancellation:
 
 ### 8.1 Cancel all loops
 
-The linked `CancellationTokenSource` is cancelled. Each loop catches `OperationCanceledException` and exits cleanly. The publish loop's `finally` block releases any in-flight leases without retry increment.
+The linked `CancellationTokenSource` is cancelled. Each loop catches `OperationCanceledException` and exits cleanly.
 
 ### 8.2 Unregister publisher
 
@@ -603,7 +544,7 @@ SQL Server uses a custom type for passing sequence number arrays:
 CREATE TYPE dbo.SequenceNumberList AS TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY);
 ```
 
-Used by `DeletePublishedAsync`, `ReleaseLeaseAsync`, and `DeadLetterAsync` for the `@PublishedIds` / `@Ids` parameters. The .NET code creates a `DataTable` with a single `SequenceNumber` column and passes it as a `SqlDbType.Structured` parameter.
+Used by `DeletePublishedAsync`, `IncrementRetryCountAsync`, and `DeadLetterAsync` for the `@Ids` parameter. The .NET code creates a `DataTable` with a single `SequenceNumber` column and passes it as a `SqlDbType.Structured` parameter.
 
 ---
 
@@ -620,14 +561,14 @@ t=0s     RegisterPublisherAsync (MERGE into OutboxPublishers)
          ├── Orphan sweep loop starts (60s intervals)
          └── Dead-letter sweep loop starts (60s intervals)
 
-t=0.1s   LeaseBatchAsync → 0 messages (no partitions owned yet)
+t=0.1s   FetchBatchAsync → 0 messages (no partitions owned yet)
          Poll interval backs off to 200ms
 
 t=30s    RebalanceAsync runs
          - 64 partitions / 1 publisher = 64 fair share
          - Claims all 64 unowned partitions
 
-t=30.1s  LeaseBatchAsync → up to 100 messages
+t=30.1s  FetchBatchAsync → up to 100 messages
          Send to Event Hub → DeletePublishedAsync
 
 t=10s    HeartbeatAsync (updates LastHeartbeatUtc, clears grace periods)
@@ -655,7 +596,7 @@ t=???    UnregisterPublisherAsync
          - Deletes from OutboxPublishers
 
          Publisher B's next OrphanSweepAsync or RebalanceAsync
-         - Claims the 16 orphaned partitions
+         - Claims the 32 orphaned partitions
 ```
 
 ---
@@ -666,9 +607,9 @@ t=???    UnregisterPublisherAsync
 |-------|------|-----------|-------------------|
 | `MERGE OutboxPublishers` | Startup | Once | No |
 | `SELECT COUNT(*) FROM OutboxPartitions` | Publish | Cached (60s refresh) | No |
-| `UPDATE Outbox SET LeasedUntilUtc...` (CTE batch) | Publish | Every poll (100ms–5s) | No (single statement) |
-| `DELETE Outbox INNER JOIN @PublishedIds` | Publish | After each successful send | No |
-| `UPDATE Outbox SET LeasedUntilUtc = NULL` | Publish | On failure/circuit-open/cancellation | No |
+| `SELECT TOP ... FROM Outbox` (FetchBatch) | Publish | Every poll (100ms–5s) | No |
+| `DELETE FROM Outbox WHERE SequenceNumber IN ...` | Publish | After each successful send | No |
+| `UPDATE Outbox SET RetryCount = RetryCount + 1` | Publish | On transport failure | No |
 | `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs) | Publish | When poison messages found | No |
 | `UPDATE OutboxPublishers SET LastHeartbeatUtc` | Heartbeat | Every 10s | Yes |
 | `SELECT COUNT_BIG(*) FROM Outbox` | Heartbeat | Every 10s | No |

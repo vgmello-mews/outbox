@@ -37,7 +37,13 @@ public class CircuitBreakerRetryTests
         try
         {
             await host.StartAsync();
-            await Task.Delay(TimeSpan.FromSeconds(2)); // Let publisher register
+
+            // Wait for publisher to register and claim partitions (rebalance loop delays before first action)
+            await OutboxTestHelper.WaitUntilAsync(async () =>
+            {
+                var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
+                return owners.Values.Any(v => v != null);
+            }, TimeSpan.FromSeconds(10), message: "Publisher should claim partitions");
 
             // Block broker
             transport.SetFailing(true);

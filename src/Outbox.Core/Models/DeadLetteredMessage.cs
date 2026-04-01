@@ -16,4 +16,8 @@ public sealed record DeadLetteredMessage(
     int RetryCount,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadLetteredAtUtc,
-    string? LastError);
+    string? LastError)
+{
+    /// <summary>Parameterless constructor for Dapper property-based materialization.</summary>
+    public DeadLetteredMessage() : this(0, 0, "", "", "", null, [], "", default, 0, 0, default, default, null) { }
+}

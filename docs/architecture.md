@@ -33,21 +33,21 @@ The publisher doesn't receive push notifications. It **polls** the database on a
 
 ### Step by step
 
-1. **Lease a batch** — `LeaseBatchAsync` selects up to `BatchSize` (default 100) messages from partitions owned by this publisher. Each selected row gets a `lease_owner` stamp and a `leased_until_utc` expiry. Rows locked by other publishers are skipped (`SKIP LOCKED` in PostgreSQL, `READPAST` in SQL Server).
+1. **Fetch a batch** — `FetchBatchAsync` selects up to `BatchSize` (default 100) messages from partitions owned by this publisher. This is a pure `SELECT`—no row locking or lease stamping. A version ceiling filter (`xmin` on PostgreSQL, `RowVersion` on SQL Server) withholds rows from in-flight write transactions to prevent out-of-order publishing.
 
 2. **Separate poison messages** — Messages with `retry_count >= MaxRetryCount` are immediately dead-lettered with `CancellationToken.None`.
 
 3. **Group by destination** — Healthy messages are grouped by `(topic_name, partition_key)`.
 
-4. **Check circuit breaker** — If the circuit is open for a topic, the group is released without incrementing the retry count.
+4. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without incrementing the retry count. Messages stay in the outbox and will be picked up when the circuit closes.
 
 5. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `SequenceNumber`.
 
 6. **Delete on success** — Successfully sent messages are deleted from the outbox.
 
-7. **Release on failure** — Failed messages have their lease cleared and `retry_count` incremented.
+7. **Increment retry on failure** — Failed messages have their `retry_count` incremented via `IncrementRetryCountAsync`.
 
-8. **Safety net** — A `finally` block releases any messages that weren't explicitly handled (covers mid-batch crashes and cancellation).
+8. **No safety net needed** — Partition ownership is the sole isolation mechanism. There are no leases to release on cancellation or crash.
 
 ### Adaptive polling
 
@@ -65,7 +65,9 @@ Ordering is guaranteed within a `(topic, partition_key)` pair. Three mechanisms 
 
 ### 1. Store-level ordering
 
-`LeaseBatchAsync` orders by `(event_datetime_utc, event_ordinal)`. The `event_ordinal` field (a `SMALLINT`) breaks ties when multiple events share the same timestamp—common when a single transaction inserts several events.
+`FetchBatchAsync` orders by `(event_datetime_utc, event_ordinal)`. The `event_ordinal` field (an `INT`) breaks ties when multiple events share the same timestamp—common when a single transaction inserts several events.
+
+A version ceiling filter ensures rows from in-flight write transactions aren't visible yet. PostgreSQL uses `xmin < pg_snapshot_xmin(pg_current_snapshot())` and SQL Server uses `RowVersion < MIN_ACTIVE_ROWVERSION()`. This prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order.
 
 ### 2. Batch-level ordering
 
@@ -75,11 +77,11 @@ Before sending each group to the transport, the publish loop sorts by `SequenceN
 var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
 ```
 
-This guarantees monotonic ordering even when a batch contains messages from different poll cycles (e.g., after a lease expiry re-lease).
+This guarantees monotonic ordering within each group.
 
 ### 3. Partition ownership (single-writer guarantee)
 
-Each logical partition is owned by exactly one publisher at a time. `LeaseBatchAsync` only returns messages from owned partitions. Combined with a grace period during ownership transfers, this ensures no two publishers ever concurrently process the same partition key's messages.
+Each logical partition is owned by exactly one publisher at a time. `FetchBatchAsync` only returns messages from owned partitions. Combined with a grace period during ownership transfers, this ensures no two publishers ever concurrently process the same partition key's messages. Partition ownership is the sole isolation mechanism—there are no per-message leases.
 
 ### What's not ordered
 
@@ -87,7 +89,7 @@ Messages with **different partition keys** have no ordering guarantee. If you ne
 
 ### Deduplication
 
-A successfully sent message that fails to delete (e.g., database hiccup after the broker acknowledged) will be re-delivered on the next poll. Consumers must be idempotent. Use `SequenceNumber` as a deduplication key.
+A successfully sent message that fails to delete (e.g., database hiccup after the broker acknowledged) will be re-delivered on the next poll since the row remains in the outbox. Consumers must be idempotent. Use `SequenceNumber` as a deduplication key.
 
 ## Publisher groups
 
@@ -116,7 +118,7 @@ outbox_partitions
 └───────────────────┴──────────────┴────────────────────┘
 ```
 
-Every query that touches these tables — heartbeat, rebalance, lease, sweep — filters by `outbox_table_name`. This means:
+Every query that touches these tables — heartbeat, rebalance, fetch, sweep — filters by `outbox_table_name`. This means:
 
 - Publishers registered against `outbox` only see and compete for `outbox` partitions
 - Publishers registered against `orders_outbox` only see and compete for `orders_outbox` partitions
@@ -202,7 +204,7 @@ Three background loops manage partition assignment:
 
 ### The grace period
 
-When a publisher stops heartbeating, its partitions aren't immediately reassigned. Instead, they enter a grace period (`PartitionGracePeriodSeconds`, default 60s). The grace period must be strictly longer than `LeaseDurationSeconds` (default 45s) to prevent two publishers from processing the same partition simultaneously.
+When a publisher stops heartbeating, its partitions aren't immediately reassigned. Instead, they enter a grace period (`PartitionGracePeriodSeconds`, default 60s). This gives the original publisher time to finish any in-flight work before a new owner takes over.
 
 If the original publisher comes back and heartbeats, the grace period is cancelled. If it doesn't, the partition becomes claimable.
 
@@ -231,7 +233,7 @@ Each topic has its own circuit breaker that prevents retry-count burn during bro
 | State        | Behavior                                                                        |
 | ------------ | ------------------------------------------------------------------------------- |
 | **Closed**   | Normal operation. Failures are counted.                                         |
-| **Open**     | Messages are released _without_ incrementing `retry_count`. No sends attempted. |
+| **Open**     | Messages are skipped—they stay in the outbox without incrementing `retry_count`. No sends attempted. |
 | **HalfOpen** | Timer expired. One probe batch is allowed through.                              |
 
 ### Transitions
@@ -292,7 +294,7 @@ All five loops run inside a shared cancellation scope. If any loop exits (crash 
 | `outbox.publish.failures`              | Counter        | Failed publish attempts       |
 | `outbox.circuit_breaker.state_changes` | Counter        | Circuit state transitions     |
 | `outbox.publish.duration`              | Histogram (ms) | Transport send duration       |
-| `outbox.poll.duration`                 | Histogram (ms) | Database lease duration       |
+| `outbox.poll.duration`                 | Histogram (ms) | Database fetch duration       |
 | `outbox.poll.batch_size`               | Histogram      | Messages per batch            |
 
 ### Distributed tracing
@@ -306,7 +308,7 @@ Implement `IOutboxEventHandler` to receive lifecycle notifications:
 | Callback                            | When                                         |
 | ----------------------------------- | -------------------------------------------- |
 | `OnMessagePublishedAsync`           | After successful send, before delete         |
-| `OnPublishFailedAsync`              | After transport failure, after lease release |
+| `OnPublishFailedAsync`              | After transport failure, after retry increment |
 | `OnMessageDeadLetteredAsync`        | After a message is dead-lettered             |
 | `OnCircuitBreakerStateChangedAsync` | After any circuit state change               |
 | `OnRebalanceAsync`                  | After partition rebalance                    |
@@ -330,7 +332,6 @@ All publisher options are in the `"Outbox:Publisher"` configuration section and 
 | ----------------------------------- | ------- | -------------------------------------- |
 | `GroupName`                         | null    | Publisher group name (null = default)  |
 | `BatchSize`                         | 100     | Messages per poll                      |
-| `LeaseDurationSeconds`              | 45      | Lock duration per message              |
 | `MaxRetryCount`                     | 5       | Retries before dead-lettering          |
 | `MinPollIntervalMs`                 | 100     | Fastest poll rate                      |
 | `MaxPollIntervalMs`                 | 5000    | Slowest poll rate                      |
@@ -370,6 +371,5 @@ This lets you set shared defaults at the top level and override per group—for 
 
 These are enforced at startup and will fail fast if violated:
 
-- `PartitionGracePeriodSeconds > LeaseDurationSeconds` — prevents dual partition processing
 - `HeartbeatTimeoutSeconds × 1000 ≥ HeartbeatIntervalMs × 3` — tolerates at least 2 missed heartbeats
 - `MaxRetryCount > CircuitBreakerFailureThreshold` — circuit breaker can activate before dead-lettering

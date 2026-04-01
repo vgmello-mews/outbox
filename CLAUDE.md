@@ -9,7 +9,7 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 - `OutboxPublisherService` (BackgroundService) runs 5 parallel loops: publish, heartbeat, rebalance, orphan sweep, dead-letter sweep
 - Messages are partitioned by `hash(partition_key) % total_partitions`, each partition owned by one publisher
 - Circuit breaker per topic prevents retry-count burn during broker outages
-- Leases with timeout prevent duplicate processing across publishers
+- Partition ownership prevents duplicate processing across publishers
 
 ## Critical Documents
 
@@ -28,8 +28,8 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 ## Review Checklist
 
 Before approving any change, verify against `docs/outbox-requirements-invariants.md`:
-- [ ] Retry count only incremented on transport failure (never on delete failure or circuit-open release)
-- [ ] Lease owner checked on all delete/release/dead-letter operations
+- [ ] Retry count only incremented on transport failure (never on delete failure or circuit-open skip)
+- [ ] No per-message lease columns remain (partition ownership is the sole isolation mechanism)
 - [ ] `CancellationToken.None` used for cleanup operations in failure paths
 - [ ] No tight loops without backoff (check circuit-open and error paths)
 - [ ] Health state updated before event handler callbacks

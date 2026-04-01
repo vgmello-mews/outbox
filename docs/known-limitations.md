@@ -30,7 +30,7 @@ The Confluent.Kafka `IProducer<K,V>.Flush()` method is synchronous by design —
 
 **Affected:** `KafkaOutboxTransport.SendSubBatchAsync`
 
-**What happens:** Messages are queued via `_producer.Produce()` (non-blocking, enqueues internally). Then `Flush` drains the internal queue. If the cancellation token fires (timeout) before all delivery reports arrive, `ThrowIfCancellationRequested()` throws `OperationCanceledException`. The method exits with an exception. But some messages may have already been delivered to Kafka — their delivery reports just hadn't arrived yet. The caller treats the entire batch as failed (`ReleaseLeaseAsync(incrementRetry: true)`), and those already-delivered messages will be re-sent on the next retry cycle.
+**What happens:** Messages are queued via `_producer.Produce()` (non-blocking, enqueues internally). Then `Flush` drains the internal queue. If the cancellation token fires (timeout) before all delivery reports arrive, `ThrowIfCancellationRequested()` throws `OperationCanceledException`. The method exits with an exception. But some messages may have already been delivered to Kafka — their delivery reports just hadn't arrived yet. The caller treats the entire batch as failed (`IncrementRetryCountAsync`), and those already-delivered messages will be re-sent on the next retry cycle.
 
 **Why EventHub doesn't have this:** EventHub's `_client.SendAsync(batch, ct)` is atomic per batch. Either the entire batch is accepted or it isn't. There is no intermediate state where "some messages are delivered but the SDK doesn't know yet." The Azure SDK handles cancellation internally and provides a clean success/failure boundary.
 
@@ -65,8 +65,8 @@ The key insight: after a timeout, we should NOT assume all messages failed. The 
 **Impact if not resolved:**
 
 - **Extra duplicates during timeout scenarios.** Since the outbox pattern already guarantees at-least-once (not exactly-once), duplicates are expected. This issue increases the duplicate rate during Kafka backpressure, but consumers must be idempotent regardless.
-- **Ordering is preserved.** Ghost-written messages are re-leased in `sequence_number` order by `LeaseBatchAsync`, so the consumer sees duplicates but never out-of-order delivery within a partition key.
-- **False dead-lettering under sustained backpressure.** Each timeout increments `retry_count` via `ReleaseLeaseAsync(incrementRetry: true)`, even for messages that were already delivered. Under sustained Kafka backpressure, `retry_count` can reach `MaxRetryCount` and the message gets dead-lettered despite successful delivery. This does not cause data loss (the consumer already received it), but operators should be aware that dead-lettered messages from Kafka timeout scenarios may not actually be undelivered. Tuning `SendTimeoutSeconds` to match realistic Kafka latency reduces this risk.
+- **Ordering is preserved.** Ghost-written messages are re-fetched in `event_datetime_utc, event_ordinal` order by `FetchBatchAsync`, so the consumer sees duplicates but never out-of-order delivery within a partition key.
+- **False dead-lettering under sustained backpressure.** Each timeout increments `retry_count` via `IncrementRetryCountAsync`, even for messages that were already delivered. Under sustained Kafka backpressure, `retry_count` can reach `MaxRetryCount` and the message gets dead-lettered despite successful delivery. This does not cause data loss (the consumer already received it), but operators should be aware that dead-lettered messages from Kafka timeout scenarios may not actually be undelivered. Tuning `SendTimeoutSeconds` to match realistic Kafka latency reduces this risk.
 
 ---
 
@@ -99,7 +99,7 @@ This is intentional: each provider uses its database's native hash function for 
 
 ### Options hot-reload support
 
-Both the publisher service and store implementations use `IOptionsMonitor<OutboxPublisherOptions>`, meaning timing parameters like `HeartbeatTimeoutSeconds`, `LeaseDurationSeconds`, and `PartitionGracePeriodSeconds` can be changed at runtime. Changes take effect on the next operation cycle.
+Both the publisher service and store implementations use `IOptionsMonitor<OutboxPublisherOptions>`, meaning timing parameters like `HeartbeatTimeoutSeconds` and `PartitionGracePeriodSeconds` can be changed at runtime. Changes take effect on the next operation cycle.
 
 **Snapshot-per-method guarantee:** Each store method snapshots `CurrentValue` once at the top of the method. All SQL steps within a single method (e.g., the 3-step rebalance transaction) use the same snapshot, preventing intra-operation inconsistency where different steps see different timeout values.
 

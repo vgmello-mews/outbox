@@ -19,9 +19,9 @@ The contract between the publisher engine and any database backend. Every method
 |---|---|
 | `RegisterPublisherAsync` | Register this publisher instance, returns a `publisherId` |
 | `UnregisterPublisherAsync` | Remove registration and release partition ownership |
-| `LeaseBatchAsync` | Claim a batch of messages from owned partitions |
-| `DeletePublishedAsync` | Remove successfully sent messages (checks `lease_owner`) |
-| `ReleaseLeaseAsync` | Clear lease, optionally increment `retry_count` |
+| `FetchBatchAsync` | Select a batch of messages from owned partitions (pure SELECT) |
+| `DeletePublishedAsync` | Remove successfully sent messages |
+| `IncrementRetryCountAsync` | Increment `retry_count` on transport failure |
 | `DeadLetterAsync` | Atomically move messages to the dead-letter table |
 | `HeartbeatAsync` | Update heartbeat and clear grace periods |
 | `GetTotalPartitionsAsync` | Total partition count (cached 60s) |
@@ -50,7 +50,7 @@ Observer callbacks for lifecycle events. All methods have default implementation
 | Callback | When it fires |
 |---|---|
 | `OnMessagePublishedAsync` | After successful send, before delete |
-| `OnPublishFailedAsync` | After transport failure, after lease release |
+| `OnPublishFailedAsync` | After transport failure, after retry increment |
 | `OnMessageDeadLetteredAsync` | After dead-lettering |
 | `OnCircuitBreakerStateChangedAsync` | After circuit state change |
 | `OnRebalanceAsync` | After partition rebalance |
@@ -115,7 +115,7 @@ A sealed `BackgroundService` that runs five concurrent loops:
 
 | Loop | Interval | Purpose |
 |---|---|---|
-| Publish | Adaptive (100ms–5s) | Lease → Send → Delete core path |
+| Publish | Adaptive (100ms–5s) | Fetch → Send → Delete core path |
 | Heartbeat | 10s | Keep publisher alive, clear grace periods |
 | Rebalance | 30s | Fair-share partition distribution |
 | Orphan sweep | 60s | Claim unowned partitions |
@@ -125,7 +125,7 @@ If any loop exits, all others are cancelled. After 5 consecutive restarts withou
 
 ### TopicCircuitBreaker
 
-Per-topic circuit breaker with three states: Closed, Open, HalfOpen. Prevents retry-count burn during broker outages by releasing messages without incrementing `retry_count` when open.
+Per-topic circuit breaker with three states: Closed, Open, HalfOpen. Prevents retry-count burn during broker outages by skipping messages (leaving them in the outbox) when open.
 
 ## Health check
 
@@ -159,7 +159,6 @@ Bind from `"Outbox:Publisher"` in `IConfiguration`. Supports hot-reload via `IOp
 | Option | Default |
 |---|---|
 | `BatchSize` | 100 |
-| `LeaseDurationSeconds` | 45 |
 | `MaxRetryCount` | 5 |
 | `MinPollIntervalMs` | 100 |
 | `MaxPollIntervalMs` | 5000 |

@@ -57,9 +57,9 @@ public class ProcessKillTests
 
             // Re-insert stale publisher with old heartbeat
             await using var insertCmd = new NpgsqlCommand(@"
-                INSERT INTO outbox_publishers (publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
-                VALUES (@id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
-                ON CONFLICT (publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
+                INSERT INTO outbox_publishers (outbox_table_name, publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
+                VALUES ('outbox', @id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
+                ON CONFLICT (outbox_table_name, publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
                 conn);
             insertCmd.Parameters.AddWithValue("@id", publisherIdA);
             await insertCmd.ExecuteNonQueryAsync();
@@ -67,7 +67,7 @@ public class ProcessKillTests
             // Assign half the partitions to the dead publisher
             await using var assignCmd = new NpgsqlCommand(@"
                 UPDATE outbox_partitions SET owner_publisher_id = @id, owned_since_utc = clock_timestamp()
-                WHERE partition_id < 16", conn);
+                WHERE partition_id < 16 AND outbox_table_name = 'outbox'", conn);
             assignCmd.Parameters.AddWithValue("@id", publisherIdA);
             await assignCmd.ExecuteNonQueryAsync();
         }
@@ -166,9 +166,9 @@ public class ProcessKillTests
 
             // Re-insert stale publisher with old heartbeat (simulating no cleanup)
             await using var insertCmd = new NpgsqlCommand(@"
-                INSERT INTO outbox_publishers (publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
-                VALUES (@id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
-                ON CONFLICT (publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
+                INSERT INTO outbox_publishers (outbox_table_name, publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
+                VALUES ('outbox', @id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
+                ON CONFLICT (outbox_table_name, publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
                 conn);
             insertCmd.Parameters.AddWithValue("@id", publisherIdA);
             await insertCmd.ExecuteNonQueryAsync();

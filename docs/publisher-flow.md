@@ -18,21 +18,20 @@ flowchart TB
         subgraph PUBLISH["Loop 1: Publish loop"]
             direction TB
             P1["Poll store at adaptive interval\n(100ms → 30s backoff)"]
-            P1 --> P2["LeaseBatchAsync"]
+            P1 --> P2["FetchBatchAsync"]
 
-            subgraph LEASE["Message selection (LeaseBatchAsync)"]
+            subgraph FETCH["Message selection (FetchBatchAsync)"]
                 direction TB
                 L1["Filter: partition owned by this publisher"]
                 L1 --> L2["Filter: grace period expired or NULL"]
-                L2 --> L3["Filter: not currently leased\n(leased_until_utc expired or NULL)"]
-                L3 --> L4["Filter: retry_count < MaxRetryCount"]
-                L4 --> L5["Row-level lock\nPG: FOR UPDATE SKIP LOCKED\nSQL: ROWLOCK, READPAST"]
-                L5 --> L6["ORDER BY event_datetime_utc,\nevent_ordinal"]
-                L6 --> L7["Update lease + increment retry_count\nif previously leased"]
+                L2 --> L3["Filter: retry_count < MaxRetryCount"]
+                L3 --> L4["Version ceiling filter\nPG: xmin < pg_snapshot_xmin\nSQL: RowVersion < MIN_ACTIVE_ROWVERSION()"]
+                L4 --> L5["ORDER BY event_datetime_utc,\nevent_ordinal"]
+                L5 --> L6["Pure SELECT — no row locking"]
             end
 
-            P2 --> LEASE
-            LEASE --> P3{"Batch empty?"}
+            P2 --> FETCH
+            FETCH --> P3{"Batch empty?"}
             P3 -->|Yes| P3B["Increase poll interval\n(adaptive backoff)"] --> P1
             P3 -->|No| P4["Separate poison vs healthy messages"]
 
@@ -41,14 +40,14 @@ flowchart TB
             P5 -->|No| P7["Group by (TopicName, PartitionKey)"]
 
             P7 --> P8{"Circuit breaker\nopen for topic?"}
-            P8 -->|Open| P9["Release WITHOUT\nretry increment"]
+            P8 -->|Open| P9["Skip — messages stay\nin outbox"]
             P8 -->|Closed/HalfOpen| P10["Apply interceptors\n(headers, payload, type)"]
             P10 --> P11["Transport.SendAsync\n(with sub-batching)"]
 
             P11 --> P12{"Result?"}
             P12 -->|Success| P13["DeletePublishedAsync\n+ circuit RecordSuccess"]
-            P12 -->|Partial| P14["Delete succeeded msgs\nRelease failed WITH retry++\ncircuit RecordFailure"]
-            P12 -->|Failure| P15["Release ALL WITH retry++\ncircuit RecordFailure"]
+            P12 -->|Partial| P14["Delete succeeded msgs\nIncrementRetryCount for failed\ncircuit RecordFailure"]
+            P12 -->|Failure| P15["IncrementRetryCount ALL\ncircuit RecordFailure"]
 
             P13 --> P1
             P14 --> P1
@@ -78,7 +77,7 @@ flowchart TB
         end
 
         subgraph DLS["Loop 5: Dead-letter sweep\n(every 300s)"]
-            D1["Find: retry >= Max\n+ not leased\n+ owner dead/null/stale"]
+            D1["Find: retry >= Max"]
             D1 --> D2["Atomic DELETE from outbox\nINSERT into dead_letter"]
         end
     end
@@ -113,10 +112,10 @@ flowchart TB
         direction TB
         OG1["Within same (topic, partitionKey):\nSTRICT ORDER guaranteed"]
         OG2["Across different partitionKeys:\nNO ordering guarantee"]
-        OG3["Partition affinity:\nlease duration < grace period\n= no overlap between publishers"]
+        OG3["Partition ownership:\nsingle publisher per partition\n= no overlap between publishers"]
     end
 
-    HASH -.-> LEASE
+    HASH -.-> FETCH
     P11 -.-> TRANSPORT
     P8 -.-> CIRCUIT
 ```
@@ -137,19 +136,19 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 ### Publish loop
 
 1. **Poll** the store at an adaptive interval (100ms when busy, backs off to 30s when idle)
-2. **Lease** a batch of messages—only from owned partitions, not currently leased, under max retry count
+2. **Fetch** a batch of messages—only from owned partitions, under max retry count, with version ceiling filter
 3. **Separate** poison messages (retry >= max) and dead-letter them immediately
 4. **Group** healthy messages by `(topic, partitionKey)`
-5. **Check circuit breaker**—if open, release without incrementing retry count
+5. **Check circuit breaker**—if open, skip the group (messages stay in the outbox)
 6. **Apply interceptors** (modify headers, payload, event type)
 7. **Send** via transport with sub-batching
-8. **Finalize**—delete on success, release with retry increment on failure
+8. **Finalize**—delete on success, increment retry count on failure
 
 ### Concurrency controls
 
-- **Row-level locking** (`FOR UPDATE SKIP LOCKED` / `ROWLOCK, READPAST`) prevents duplicate leasing
-- **Lease ownership checks** on all delete/release/dead-letter operations
-- **Partition affinity** ensures one publisher per partition (`lease duration < grace period`)
+- **Partition ownership** ensures one publisher per partition—the sole isolation mechanism
+- **Version ceiling filter** prevents publishing rows from in-flight write transactions
+- **Grace period** on partition handover prevents overlap between old and new owners
 - **Ordering** within `(topic, partitionKey)` is strict (`ORDER BY event_datetime_utc, event_ordinal`)
 
 ### Background loops
@@ -163,7 +162,7 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 
 ### Circuit breaker
 
-Each topic has its own circuit breaker: **Closed → Open → HalfOpen → Closed**. When open, messages are released without burning retry counts—this prevents retry exhaustion during broker outages.
+Each topic has its own circuit breaker: **Closed → Open → HalfOpen → Closed**. When open, messages are skipped (left in the outbox) without burning retry counts—this prevents retry exhaustion during broker outages.
 
 ### Transport layer
 
@@ -182,25 +181,22 @@ The primary event buffer. Messages are inserted here inside the same transaction
 | `topic_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Target broker topic |
 | `partition_key` | `VARCHAR(256)` / `NVARCHAR(256)` | Hashed to assign partition ownership |
 | `event_type` | `VARCHAR(256)` / `NVARCHAR(256)` | Event type identifier |
-| `headers` | `TEXT` / `NVARCHAR(MAX)` | JSON-serialized headers (nullable) |
+| `headers` | `VARCHAR(2000)` / `NVARCHAR(2000)` | JSON-serialized headers (nullable) |
 | `payload` | `BYTEA` / `VARBINARY(MAX)` | Binary event payload |
 | `created_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Insertion timestamp (default `NOW()`) |
 | `event_datetime_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Business event time, primary sort key |
-| `event_ordinal` | `SMALLINT` | Tiebreaker for same-timestamp events (default 0) |
+| `event_ordinal` | `INT` | Tiebreaker for same-timestamp events (default 0) |
 | `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)` | MIME type (default `application/json`) |
-| `leased_until_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Lease expiry (NULL = unleased) |
-| `lease_owner` | `VARCHAR(128)` / `NVARCHAR(128)` | Publisher ID holding the lease (NULL = unleased) |
 | `retry_count` | `INT` | Delivery attempts (default 0) |
+| `RowVersion` | `ROWVERSION` (SQL Server only) | Version ceiling for ordering safety |
 
 **Indexes:**
 
-| Index | Columns | Filter | Purpose |
-|-------|---------|--------|---------|
-| `ix_outbox_unleased` | `(event_datetime_utc, event_ordinal)` + includes | `WHERE leased_until_utc IS NULL` | Fast lookup of fresh messages |
-| `ix_outbox_lease_expiry` | `(leased_until_utc, event_datetime_utc, event_ordinal)` + includes | `WHERE leased_until_utc IS NOT NULL` | Fast lookup of expired leases |
-| `ix_outbox_sweep` | `(retry_count, lease_owner)` + includes | None | Dead-letter sweep lookups |
+| Index | Columns | Purpose |
+|-------|---------|---------|
+| `ix_outbox_pending` | `(event_datetime_utc, event_ordinal)` + includes | Fast lookup of pending messages in causal order |
 
-The two partial indexes (`ix_outbox_unleased` and `ix_outbox_lease_expiry`) keep the index small at steady state—most messages get deleted quickly, so only fresh or stale rows match.
+A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table.
 
 ### outbox_dead_letter
 
@@ -213,12 +209,12 @@ Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via two
 | `topic_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Original target topic |
 | `partition_key` | `VARCHAR(256)` / `NVARCHAR(256)` | Original partition key |
 | `event_type` | `VARCHAR(256)` / `NVARCHAR(256)` | Original event type |
-| `headers` | `TEXT` / `NVARCHAR(MAX)` | Original headers (nullable) |
+| `headers` | `VARCHAR(2000)` / `NVARCHAR(2000)` | Original headers (nullable) |
 | `payload` | `BYTEA` / `VARBINARY(MAX)` | Original payload |
 | `created_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Original insertion time |
 | `retry_count` | `INT` | Final retry count at dead-letter time |
 | `event_datetime_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Original business event time |
-| `event_ordinal` | `SMALLINT` | Original ordinal |
+| `event_ordinal` | `INT` | Original ordinal |
 | `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)` | Original MIME type |
 | `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | When the message was dead-lettered |
 | `last_error` | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable) |
@@ -261,7 +257,7 @@ Partition ownership ledger. Maps logical partitions (0–31 by default) to activ
 | Owned | `<publisher_id>` | `NULL` | Only this publisher processes its messages |
 | In grace | `<stale_publisher_id>` | Future timestamp | Original owner may still be processing; claimable after expiry |
 
-**Critical invariant:** `LeaseDurationSeconds < PartitionGracePeriodSeconds`. This ensures that by the time a grace period expires, any outstanding lease from the original owner has also expired—preventing two publishers from processing the same partition simultaneously.
+**Critical invariant:** The grace period gives the original owner time to finish any in-flight work before a new owner takes over. Since there are no per-message leases, partition ownership is the sole mechanism preventing two publishers from processing the same partition simultaneously.
 
 ### Diagnostic views
 
@@ -272,7 +268,7 @@ Both providers include read-only views for debugging:
 
 ### SQL Server TVP
 
-SQL Server uses a table-valued parameter type `dbo.SequenceNumberList` (`TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY)`) to pass sequence number arrays to `DeletePublishedAsync`, `ReleaseLeaseAsync`, and `DeadLetterAsync`. PostgreSQL uses native `BIGINT[]` arrays instead.
+SQL Server uses a table-valued parameter type `dbo.SequenceNumberList` (`TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY)`) to pass sequence number arrays to `DeletePublishedAsync`, `IncrementRetryCountAsync`, and `DeadLetterAsync`. PostgreSQL uses native `BIGINT[]` arrays instead.
 
 ## Data flow between tables
 
@@ -280,15 +276,15 @@ SQL Server uses a table-valued parameter type `dbo.SequenceNumberList` (`TABLE (
 flowchart LR
     APP["Application transaction:\nINSERT business data +\nINSERT INTO outbox"] --> OUTBOX[(outbox)]
 
-    OUTBOX -->|"LeaseBatchAsync\n(lock + lease)"| PUB["Publisher"]
+    OUTBOX -->|"FetchBatchAsync\n(pure SELECT)"| PUB["Publisher"]
     PUB -->|"SendAsync success\n→ DeletePublishedAsync"| BROKER["Broker\n(Kafka/EventHub)"]
-    PUB -->|"Transport failure\n→ ReleaseLeaseAsync"| OUTBOX
+    PUB -->|"Transport failure\n→ IncrementRetryCountAsync"| OUTBOX
     PUB -->|"retry >= max\n→ DeadLetterAsync\n(atomic CTE)"| DL[(outbox_dead_letter)]
     OUTBOX -->|"Dead-letter sweep\n(atomic CTE)"| DL
 
     PROD[(outbox_publishers)] -->|"HeartbeatAsync"| PROD
     PROD -->|"Stale detection\n→ RebalanceAsync"| PART[(outbox_partitions)]
-    PART -->|"Owned partition IDs\nfilter LeaseBatchAsync"| OUTBOX
+    PART -->|"Owned partition IDs\nfilter FetchBatchAsync"| OUTBOX
 
     PUB -->|"RegisterPublisherAsync"| PROD
     PUB -->|"UnregisterPublisherAsync\n(shutdown)"| PROD

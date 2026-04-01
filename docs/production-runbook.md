@@ -40,7 +40,7 @@ Application Transaction
 └── Write event to outbox table (same transaction)
          ↓
 OutboxPublisherService (5 concurrent loops):
-├── PublishLoop    — Lease → Send → Delete (core path)
+├── PublishLoop    — Fetch → Send → Delete (core path)
 ├── HeartbeatLoop  — Keep publisher alive (10s)
 ├── RebalanceLoop  — Redistribute partitions (30s)
 ├── OrphanSweep    — Claim unowned partitions (60s)
@@ -54,8 +54,7 @@ Consumer
 **Key defaults:**
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| BatchSize | 100 | Messages per lease cycle |
-| LeaseDurationSeconds | 45 | How long a lease is held |
+| BatchSize | 100 | Messages per fetch cycle |
 | MaxRetryCount | 5 | Retries before dead-lettering |
 | HeartbeatIntervalMs | 10,000 | Heartbeat frequency |
 | HeartbeatTimeoutSeconds | 30 | Stale publisher detection |
@@ -113,7 +112,7 @@ The health check at `/health` reports three states:
 
 1. Publisher attempts to send, fails (3 consecutive failures by default)
 2. Circuit breaker opens for the affected topic
-3. Leased messages are released **without** incrementing `retry_count` (preserves retry budget)
+3. Messages are skipped—they stay in the outbox **without** incrementing `retry_count` (preserves retry budget)
 4. Publisher continues heartbeating and managing partitions normally
 5. After 30s (`CircuitBreakerOpenDurationSeconds`), circuit transitions to HalfOpen
 6. One probe batch is sent — if it fails, circuit re-opens; if it succeeds, circuit closes
@@ -145,7 +144,7 @@ The health check at `/health` reports three states:
 
 - All store operations fail with transient error logs
 - Health check transitions to `Unhealthy` (stale heartbeat, stale polls)
-- No messages being published (cannot lease)
+- No messages being published (cannot fetch)
 - Application transactions also fail (separate concern)
 
 **What happens automatically:**
@@ -186,7 +185,6 @@ The health check at `/health` reports three states:
 
 - Publisher process disappears suddenly
 - No `UnregisterPublisherAsync` called — publisher row remains in DB
-- Leased messages remain locked until `LeaseDurationSeconds` expires
 - Surviving publishers detect stale heartbeat after `HeartbeatTimeoutSeconds` (30s)
 
 **What happens automatically:**
@@ -195,14 +193,13 @@ The health check at `/health` reports three states:
 2. Surviving publishers detect staleness during rebalance loop (every 30s)
 3. Dead publisher's partitions enter grace period (`PartitionGracePeriodSeconds` = 60s)
 4. After grace period, surviving publishers claim orphaned partitions
-5. Dead publisher's leases expire after `LeaseDurationSeconds` (45s)
-6. Expired-lease messages are re-leased by surviving publishers with `retry_count` incremented
-7. All messages eventually published (some may be duplicated)
+5. Messages from the dead publisher's partitions are fetched and processed by the new owner
+6. All messages eventually published (some may be duplicated if they were mid-send when the process died)
 
-**Auto-recovery:** YES — fully automatic via lease expiry + partition rebalance.
+**Auto-recovery:** YES — fully automatic via partition rebalance.
 
 **Recovery time (worst case):**
-`HeartbeatTimeout (30s) + GracePeriod (60s) + LeaseExpiry (45s) + RebalanceInterval (30s)` ≈ **165 seconds**
+`HeartbeatTimeout (30s) + GracePeriod (60s) + RebalanceInterval (30s)` ≈ **120 seconds**
 
 **Operator actions:**
 
@@ -233,10 +230,9 @@ The health check at `/health` reports three states:
 
 1. `CancellationToken` is triggered
 2. All loops receive cancellation and exit
-3. In-flight leases are released (leased_until_utc = NULL) — NOT waiting for lease expiry
-4. Publisher unregistered from DB
-5. Partitions immediately available for other publishers
-6. New publisher instance (from deployment) claims partitions on startup
+3. Publisher unregistered from DB — partitions released
+4. Partitions immediately available for other publishers
+5. New publisher instance (from deployment) claims partitions on startup
 
 **Auto-recovery:** YES — designed for zero-downtime rolling deployments.
 
@@ -262,7 +258,7 @@ The health check at `/health` reports three states:
 **What happens automatically:**
 
 1. Transport `SendAsync` throws for the message (e.g., too large for EventHub batch)
-2. `ReleaseLeaseAsync(incrementRetry: true)` increments `retry_count`
+2. `IncrementRetryCountAsync` increments `retry_count`
 3. After `MaxRetryCount` (5) failures, message is moved to `outbox_dead_letter` table
 4. `last_error` column populated with exception message
 5. Remaining healthy messages in the batch continue processing
@@ -315,9 +311,9 @@ Same as [FS-1](#fs-1-broker-down-eventhubkafka-unreachable). The key distinction
 **Symptoms:**
 
 - Same as [FS-2](#fs-2-database-down-postgresqlsql-server-unreachable)
-- Heartbeat fails, lease operations fail, rebalance fails
+- Heartbeat fails, fetch operations fail, rebalance fails
 - Health check: `Unhealthy`
-- Even though broker is reachable, no messages can be leased
+- Even though broker is reachable, no messages can be fetched
 
 **What happens automatically:**
 Same as FS-2. The publisher cannot function without the DB even if the broker is healthy.
@@ -342,12 +338,12 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 **What happens automatically:**
 
-1. Each failed send increments `retry_count` via `ReleaseLeaseAsync(incrementRetry: true)`
+1. Each failed send increments `retry_count` via `IncrementRetryCountAsync`
 2. Each successful send deletes the message from outbox
 3. Messages that accumulate `retry_count >= MaxRetryCount` are dead-lettered
 4. Circuit breaker tracks consecutive failures per topic
 
-**Risk:** Under a pattern of 2 fails → 1 success → 2 fails, `retry_count` grows steadily. A valid message can be dead-lettered if it happens to be leased during failure windows enough times. The `retry_count` is **per-message**, not per-send-attempt, and is not reset on successful sends of other messages.
+**Risk:** Under a pattern of 2 fails → 1 success → 2 fails, `retry_count` grows steadily. A valid message can be dead-lettered if it happens to be fetched during failure windows enough times. The `retry_count` is **per-message**, not per-send-attempt, and is not reset on successful sends of other messages.
 
 **Operator actions:**
 
@@ -654,16 +650,6 @@ Messages remain safely in the outbox table. Resume by scaling back up.
 -- Export pending messages
 COPY (SELECT * FROM outbox ORDER BY event_datetime_utc, event_ordinal) TO '/tmp/outbox_export.csv' CSV HEADER;
 -- Then process via a custom script that sends to the broker
-```
-
-### Emergency: Clear Stuck Leases
-
-```sql
--- PostgreSQL
-UPDATE outbox SET leased_until_utc = NULL, lease_owner = NULL WHERE leased_until_utc < clock_timestamp();
-
--- SQL Server
-UPDATE dbo.Outbox SET LeasedUntilUtc = NULL, LeaseOwner = NULL WHERE LeasedUntilUtc < SYSUTCDATETIME();
 ```
 
 ### Emergency: Reset Partition Ownership

@@ -276,4 +276,5 @@ public static class OutboxTestHelper
 
     public static string UniqueTopic(string prefix = "test") =>
         $"{prefix}-{Guid.NewGuid():N}";
+
 }

@@ -22,11 +22,11 @@ Run `db_scripts/install.sql` against your database to create the schema. The scr
 
 ## Schema
 
-Four tables, a TVP type, three indexes, two diagnostic views, and a 64-partition seed:
+Four tables, a TVP type, one index, two diagnostic views, and a 64-partition seed:
 
 | Table | Purpose |
 |---|---|
-| `dbo.Outbox` | Primary event buffer with lease columns |
+| `dbo.Outbox` | Primary event buffer |
 | `dbo.OutboxDeadLetter` | Messages past `MaxRetryCount` |
 | `dbo.OutboxPublishers` | Heartbeat registry |
 | `dbo.OutboxPartitions` | Partition-to-publisher ownership map |
@@ -40,15 +40,14 @@ Four tables, a TVP type, three indexes, two diagnostic views, and a 64-partition
 | `TopicName` | `NVARCHAR(256)` | Broker topic |
 | `PartitionKey` | `NVARCHAR(256)` | Hash input for partition assignment |
 | `Payload` | `VARBINARY(MAX)` | Raw message bytes |
-| `LeasedUntilUtc` | `DATETIME2(3)` | NULL = available |
-| `LeaseOwner` | `NVARCHAR(128)` | Publisher holding the lease |
+| `Headers` | `NVARCHAR(2000)` | JSON-serialized headers (nullable) |
+| `EventOrdinal` | `INT` | Tiebreaker for same-timestamp events |
 | `RetryCount` | `INT` | Delivery attempts |
+| `RowVersion` | `ROWVERSION` | Version ceiling for ordering safety |
 
 ### Indexes
 
-- `IX_Outbox_Unleased` — Filtered on `(EventDateTimeUtc, EventOrdinal)` where `LeasedUntilUtc IS NULL`
-- `IX_Outbox_LeaseExpiry` — Filtered on `(LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)` where `LeasedUntilUtc IS NOT NULL`
-- `IX_Outbox_Sweep` — On `(RetryCount, LeaseOwner)` for dead-letter sweep
+- `IX_Outbox_Pending` — On `(EventDateTimeUtc, EventOrdinal)` for causal-order polling
 
 ### Diagnostic views
 
@@ -64,11 +63,15 @@ ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % @TotalPartitions
 
 `CHECKSUM()` is SQL Server's built-in hash. The `CAST` to `BIGINT` before `ABS()` handles `INT_MIN` safely. This produces different partition assignments than PostgreSQL's `hashtext()`—cross-provider migration would require rehashing.
 
-### Lease mechanism
+### Fetch mechanism
 
-`LeaseBatchAsync` uses a CTE-based `UPDATE...OUTPUT` with `ROWLOCK, READPAST` hints. `READPAST` skips rows locked by other publishers instead of blocking. The retry count is incremented only on re-lease of previously-leased rows.
+`FetchBatchAsync` is a pure `SELECT` with `ROWLOCK, READPAST` hints. `READPAST` skips rows locked by other transactions instead of blocking. A version ceiling filter ensures ordering safety:
 
-All mutating operations use a `SequenceNumberList` TVP join and check `LeaseOwner = @PublisherId`.
+```sql
+WHERE o.RowVersion < MIN_ACTIVE_ROWVERSION()
+```
+
+This withholds rows from in-flight write transactions, preventing the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Partition ownership is the sole isolation mechanism — there are no per-message leases.
 
 ### Dead-lettering
 
