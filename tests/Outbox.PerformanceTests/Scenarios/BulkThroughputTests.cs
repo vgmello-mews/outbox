@@ -10,10 +10,17 @@ namespace Outbox.PerformanceTests.Scenarios;
 [Collection(PerformanceCollection.Name)]
 public class BulkThroughputTests
 {
-    // PostgreSQL handles 1M easily; SQL Server (Azure SQL Edge on ARM) is ~60x slower
-    private const int PostgreSqlMessages = 1_000_000;
-    private const int SqlServerMessages = 100_000;
+    // Redpanda is ~10x faster than EventHub emulator; SQL Server ARM is ~60x slower than PostgreSQL
     private const int StabilizationDelayMs = 15_000;
+
+    private static int GetMessageCount(TestCombination combo) => (combo.Store, combo.Transport) switch
+    {
+        (StoreType.PostgreSql, TransportType.Redpanda) => 1_000_000,
+        (StoreType.PostgreSql, TransportType.EventHub) => 200_000,
+        (StoreType.SqlServer, TransportType.Redpanda) => 100_000,
+        (StoreType.SqlServer, TransportType.EventHub) => 50_000,
+        _ => 100_000
+    };
 
     private readonly PerformanceFixture _fixture;
     private readonly ITestOutputHelper _output;
@@ -28,7 +35,7 @@ public class BulkThroughputTests
     [MemberData(nameof(TestMatrix.AllCombinations), MemberType = typeof(TestMatrix))]
     public async Task BulkDrain(TestCombination combo)
     {
-        var totalMessages = combo.Store == StoreType.PostgreSql ? PostgreSqlMessages : SqlServerMessages;
+        var totalMessages = GetMessageCount(combo);
         var storeConnStr = combo.Store == StoreType.PostgreSql
             ? _fixture.PostgreSqlConnectionString
             : _fixture.SqlServerConnectionString;
