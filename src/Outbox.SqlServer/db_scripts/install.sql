@@ -112,12 +112,12 @@ GO
 -- SECTION 3: INDEXES
 -- =============================================================================
 
--- Pending rows in causal order for polling
+-- Pending rows in causal order for polling (covering index eliminates key lookups)
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Pending')
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_Pending
     ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc);
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, RetryCount, CreatedAtUtc);
 END;
 GO
 

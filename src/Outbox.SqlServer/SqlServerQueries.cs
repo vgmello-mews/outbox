@@ -72,7 +72,7 @@ internal sealed class SqlServerQueries
                          o.Headers, o.Payload, o.PayloadContentType,
                          o.EventDateTimeUtc, o.EventOrdinal,
                          o.RetryCount, o.CreatedAtUtc
-                     FROM {outboxTable} o WITH (ROWLOCK, READPAST)
+                     FROM {outboxTable} o
                      INNER JOIN {partitionsTable} op
                          ON  op.OutboxTableName = @OutboxTableName
                          AND op.OwnerPublisherId = @PublisherId
