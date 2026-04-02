@@ -25,9 +25,15 @@ public static class TestMatrix
     private static readonly TransportType[] Transports = [TransportType.Redpanda, TransportType.EventHub];
     private static readonly int[] PublisherCounts = [1, 2, 4];
 
-    public static IEnumerable<object[]> AllCombinations()
+    public static IEnumerable<object[]> AllCombinations() => CombinationsFor(Stores);
+
+    public static IEnumerable<object[]> SqlServerCombinations() => CombinationsFor([StoreType.SqlServer]);
+
+    public static IEnumerable<object[]> PostgreSqlCombinations() => CombinationsFor([StoreType.PostgreSql]);
+
+    private static IEnumerable<object[]> CombinationsFor(StoreType[] stores)
     {
-        foreach (var store in Stores)
+        foreach (var store in stores)
         {
             foreach (var transport in Transports)
             {

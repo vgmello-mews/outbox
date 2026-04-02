@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-02 15:42 UTC
 **Database:** Azure SQL Edge (ARM64) via Docker
-**Data:** 10K messages, 128 partitions, 2 publishers (64 partitions each)
+**Data:** 10K messages, 64 partitions, 2 publishers (32 partitions each)
 
 ---
 
@@ -14,13 +14,20 @@ SELECT TOP (500) o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType, o.H
 
 **Execution Plan:**
 ```
-  |--Sort(TOP 500, ORDER BY:([o].[EventDateTimeUtc] ASC, [o].[EventOrdinal] ASC))
-            |--Clustered Index Seek(OBJECT:([master].[dbo].[OutboxPartitions].[PK_OutboxPartitions] AS [op]), SEEK:([op].[OutboxTableName]=N'Outbox'),  WHERE:([master].[dbo].[OutboxPartitions].[OwnerPublisherId] as [op].[OwnerPublisherId]=N'pub-A' AND ([master].[dbo].[OutboxPartitions].[GraceExpiresUtc] as [op].[GraceExpiresUtc] IS NULL OR [master].[dbo].[OutboxPartitions].[GraceExpiresUtc] as [op].[GraceExpiresUtc]<sysutcdatetime())) ORDERED FORWARD)
-            |--Compute Scalar(DEFINE:([Expr1004]=[master].[dbo].[Outbox].[PartitionId] as [o].[PartitionId]))
-                 |--Index Scan(OBJECT:([master].[dbo].[Outbox].[IX_Outbox_Pending] AS [o]),  WHERE:([master].[dbo].[Outbox].[RowVersion] as [o].[RowVersion]<CONVERT_IMPLICIT(timestamp,min_active_rowversion(),0) AND [master].[dbo].[Outbox].[RetryCount] as [o].[RetryCount]<(5)) ORDERED FORWARD)
+  |--Top(TOP EXPRESSION:([@BatchSize]))
+       |--Nested Loops(Inner Join)
+            |--Compute Scalar(DEFINE:([o].[PartitionId]))
+            |    |--Index Scan(OBJECT:([master].[dbo].[Outbox].[IX_Outbox_Pending] AS [o]),
+            |         WHERE:([o].[RetryCount]<[@MaxRetryCount] AND [o].[RowVersion]<min_active_rowversion())
+            |         ORDERED FORWARD)
+            |--Clustered Index Seek(OBJECT:([master].[dbo].[OutboxPartitions].[PK_OutboxPartitions] AS [op]),
+                 SEEK:([op].[OutboxTableName]=[@OutboxTableName] AND [op].[PartitionId]=[o].[PartitionId]),
+                 WHERE:([op].[OwnerPublisherId]=[@PublisherId]
+                   AND ([op].[GraceExpiresUtc] IS NULL OR [op].[GraceExpiresUtc]<sysutcdatetime()))
+                 ORDERED FORWARD)
 ```
 
-**Verdict:** Index Seek - efficient
+**Verdict:** Ordered Index Scan on IX_Outbox_Pending + Nested Loops Seek on PK_OutboxPartitions — **no Sort operator**. The ORDER BY (PartitionId, EventDateTimeUtc, EventOrdinal) matches the index key exactly, so rows stream in index order.
 
 ---
 
@@ -210,7 +217,7 @@ DELETE dl OUTPUT deleted.TopicName, deleted.PartitionKey, deleted.EventType, del
 ```
   |--Clustered Index Insert(OBJECT:([master].[dbo].[Outbox].[PK_Outbox]), OBJECT:([master].[dbo].[Outbox].[IX_Outbox_Pending]), SET:([master].[dbo].[Outbox].[TopicName] = [master].[dbo].[OutboxDeadLetter].[TopicName] as [dl].[TopicName],[master].[dbo].[Outbox].[PartitionKey] = [master].[dbo].[OutboxDeadLetter].[PartitionKey] as [dl].[PartitionKey],[master].[dbo].[Outbox].[EventType] = [master].[dbo].[OutboxDeadLetter].[EventType] as [dl].[EventType],[master].[dbo].[Outbox].[Headers] = [Expr1006],[master].[dbo].[Outbox].[Payload] = [master].[dbo].[OutboxDeadLetter].[Payload] as [dl].[Payload],[master].[dbo].[Outbox].[PayloadContentType] = [master].[dbo].[OutboxDeadLetter].[PayloadContentType] as [dl].[PayloadContentType],[master].[dbo].[Outbox].[CreatedAtUtc] = [master].[dbo].[OutboxDeadLetter].[CreatedAtUtc] as [dl].[CreatedAtUtc],[master].[dbo].[Outbox].[EventDateTimeUtc] = [master].[dbo].[OutboxDeadLetter].[EventDateTimeUtc] as [dl].[EventDateTimeUtc],[master].[dbo].[Outbox].[EventOrdinal] = [master].[dbo].[OutboxDeadLetter].[EventOrdinal] as [dl].[EventOrdinal],[master].[dbo].[Outbox].[RetryCount] = [Expr1007],[master].[dbo].[Outbox].[SequenceNumber] = [Expr1005],[master].[dbo].[Outbox].[RowVersion] = [Expr1008],[master].[dbo].[Outbox].[PartitionId] = [Expr1009]))
        |--Compute Scalar(DEFINE:([Expr1006]=[Expr1010], [Expr1007]=(0), [Expr1008]=gettimestamp((1)), [Expr1009]=[Expr1011]))
-            |--Compute Scalar(DEFINE:([Expr1010]=CONVERT_IMPLICIT(nvarchar(2000),[master].[dbo].[OutboxDeadLetter].[Headers] as [dl].[Headers],0), [Expr1011]=abs(CONVERT(bigint,checksum([master].[dbo].[OutboxDeadLetter].[PartitionKey] as [dl].[PartitionKey]),0))%(128)))
+            |--Compute Scalar(DEFINE:([Expr1010]=CONVERT_IMPLICIT(nvarchar(2000),[master].[dbo].[OutboxDeadLetter].[Headers] as [dl].[Headers],0), [Expr1011]=abs(CONVERT(bigint,checksum([master].[dbo].[OutboxDeadLetter].[PartitionKey] as [dl].[PartitionKey]),0))%(64)))
                  |--Compute Scalar(DEFINE:([Expr1005]=getidentity((295672101),(1),NULL)))
                       |--Clustered Index Delete(OBJECT:([master].[dbo].[OutboxDeadLetter].[PK_OutboxDeadLetter] AS [dl]), OBJECT:([master].[dbo].[OutboxDeadLetter].[IX_OutboxDeadLetter_SequenceNumber] AS [dl]), WHERE:([master].[dbo].[OutboxDeadLetter].[DeadLetterSeq]=(1)))
 ```
@@ -297,7 +304,7 @@ UPDATE dbo.OutboxPartitions SET OwnerPublisherId = NULL, OwnedSinceUtc = NULL, G
 
 | Query | Frequency | Plan | Verdict |
 |-------|-----------|------|---------|
-| **FetchBatch** | Every 50-1000ms | Index Scan on IX_Outbox_Pending (10K rows) / Index Seek (50K+ rows) | **Efficient** — optimizer switches to seek at scale |
+| **FetchBatch** | Every 50-1000ms | Ordered Index Scan on IX_Outbox_Pending (no Sort) + Nested Loops Seek | **Efficient** — ORDER BY matches index key, zero sorting overhead |
 | **DeletePublished** | After each send | Clustered Index Seek (PK) | **Efficient** |
 | **IncrementRetryCount** | On transport failure | Clustered Index Seek (PK) | **Efficient** |
 | **DeadLetter (inline)** | On poison messages | Clustered Index Delete (PK) | **Efficient** |
@@ -315,7 +322,7 @@ UPDATE dbo.OutboxPartitions SET OwnerPublisherId = NULL, OwnedSinceUtc = NULL, G
 ### Key findings
 
 1. **Zero missing index suggestions** — SQL Server is satisfied with the current index design.
-2. **FetchBatch uses IX_Outbox_Pending** (not PK_Outbox scan) — the precomputed PartitionId column works as intended. At 10K rows the optimizer chooses an ordered scan of the narrower index; at 50K+ rows it switches to Index Seek per partition.
+2. **FetchBatch uses IX_Outbox_Pending with no Sort operator** — the ORDER BY (PartitionId, EventDateTimeUtc, EventOrdinal) matches the index key exactly, so rows stream in index order. The Nested Loops join seeks into PK_OutboxPartitions to verify partition ownership per row.
 3. **All PK-based operations use Clustered Index Seek** — no unexpected scans on the hot path.
 4. **No key lookups** — IX_Outbox_Pending is fully covering (0 lookups in stats).
 5. **SweepDeadLetters scans the clustered index** for `RetryCount >= 5`. An index on `(RetryCount)` could help if the outbox table is very large during outages, but this query runs every 60s and typically finds very few rows — not worth an extra index.

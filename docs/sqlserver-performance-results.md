@@ -4,39 +4,38 @@
 **Platform:** Linux 6.17.0 (ARM64), .NET 10.0
 **Database:** Azure SQL Edge (mcr.microsoft.com/azure-sql-edge:latest) via Testcontainers
 **Transports:** Redpanda v24.2.18, EventHub emulator (latest)
-**Partitions:** 128 (precomputed PartitionId column), Publisher threads: 4
+**Partitions:** 64 (precomputed PartitionId column), Publisher threads: 4
 
 ---
 
-## Bulk Throughput (Current — with precomputed PartitionId)
+## Bulk Throughput (Current — 64 partitions, index-aligned ORDER BY)
 
 Pre-seeded messages drained to zero by the publisher(s).
 
 | Transport | Publishers | Messages | Duration | Msg/sec | Poll p50 | Poll p95 | Pub p50 | Pub p95 |
 |-----------|------------|----------|----------|---------|----------|----------|---------|---------|
-| Redpanda  | 1          | 100,000  | 1:08     | 1,456   | 75.3ms   | 177.6ms  | 10.2ms  | 16.8ms  |
-| Redpanda  | 2          | 100,000  | 0:41     | 2,422   | 52.6ms   | 130.8ms  | 10.3ms  | 15.3ms  |
-| Redpanda  | 4          | 100,000  | 0:23     | 4,316   | 36.4ms   | 113.1ms  | 10.3ms  | 20.9ms  |
-| EventHub  | 1          | 50,000   | 1:17     | 647     | 90.4ms   | 149.2ms  | 5.5ms   | 14.9ms  |
-| EventHub  | 2          | 50,000   | 1:11     | 700     | 24.7ms   | 173.6ms  | 5.7ms   | 22.1ms  |
-| EventHub  | 4          | 50,000   | 1:29     | 559     | 3.3ms    | 68.6ms   | 4.6ms   | 22.7ms  |
+| Redpanda  | 1          | 500,000  | 1:35     | 5,253   | 30.2ms   | 80.1ms   | 10.5ms  | 11.3ms  |
+| Redpanda  | 2          | 500,000  | 1:04     | 7,726   | 30.3ms   | 87.3ms   | 10.5ms  | 11.4ms  |
+| Redpanda  | 4          | 500,000  | 0:49     | 10,088  | 25.9ms   | 77.0ms   | 10.5ms  | 11.8ms  |
+| EventHub  | 1          | 200,000  | —        | —       | —        | —        | —       | —       |
+| EventHub  | 2          | 200,000  | —        | —       | —        | —        | —       | —       |
+| EventHub  | 4          | 200,000  | —        | —       | —        | —        | —       | —       |
 
-### Improvement vs Previous (full table scan, no precomputed column)
+### Improvement vs Previous (128 partitions, unaligned ORDER BY, 100K messages)
 
-| Combo | Before | After | Improvement | Poll p50 Before | Poll p50 After |
-|-------|--------|-------|-------------|-----------------|----------------|
-| Redpanda 1P | 1,330/s | 1,456/s | +9% | 140ms | 75ms (-46%) |
-| Redpanda 2P | 1,976/s | 2,422/s | +23% | 107ms | 53ms (-51%) |
-| Redpanda 4P | 1,758/s | **4,316/s** | **+145%** | 115ms | 36ms (-69%) |
-| EventHub 4P | 765/s | 559/s | ~same (emulator cap) | 32ms | **3.3ms (-90%)** |
+| Combo | Before (128p, 100K) | After (64p, 500K) | Improvement | Poll p50 Before | Poll p50 After |
+|-------|---------------------|---------------------|-------------|-----------------|----------------|
+| Redpanda 1P | 1,456/s | **5,253/s** | **+261%** | 75ms | 30ms (-60%) |
+| Redpanda 2P | 2,422/s | **7,726/s** | **+219%** | 53ms | 30ms (-43%) |
+| Redpanda 4P | 4,316/s | **10,088/s** | **+134%** | 36ms | 26ms (-28%) |
 
 ### Observations
 
-- **Redpanda 4P throughput more than doubled** (1,758 → 4,316 msg/sec). The precomputed PartitionId enables Index Seek instead of full table scan, and the benefit compounds with multiple concurrent publishers.
-- **Poll latency dropped 46-90%** across all combinations. At 4P with EventHub, poll p50 reached 3.3ms — comparable to PostgreSQL.
-- **Horizontal scaling now works properly:** 1P (1,456/s) → 2P (2,422/s) → 4P (4,316/s) shows near-linear scaling. Before the optimization, 4P was slower than 2P due to scan contention.
-- **EventHub throughput unchanged** — the emulator's AMQP throughput (~700/s) is the bottleneck, not the DB. But poll latency still improved dramatically.
-- **Gap with PostgreSQL narrowed from 4.7x to 2.1x** (SQL Server 4P at 4,316/s vs PostgreSQL 4P at 9,032/s).
+- **Throughput tripled at 1P** (1,456 → 5,253 msg/sec) and **more than doubled at 4P** (4,316 → 10,088 msg/sec) after aligning ORDER BY with the index and reducing from 128 to 64 partitions.
+- **Poll latency dropped further** — p50 now at 26-30ms across all publisher counts, with no significant penalty at 4P.
+- **Near-linear horizontal scaling:** 1P (5,253/s) → 2P (7,726/s) → 4P (10,088/s).
+- **Pub latency stable** at 10.5ms p50 — consistent Redpanda round-trip.
+- **Gap with PostgreSQL continues to narrow** — SQL Server 4P at 10,088/s vs PostgreSQL 4P at 9,032/s. SQL Server is now **faster** at 4P.
 
 ---
 
@@ -46,58 +45,48 @@ Continuous message insertion at the target rate for 5 minutes.
 
 | Transport | Publishers | Target Rate | Drain Rate | Peak Pending | Final Pending | Kept Up? |
 |-----------|------------|-------------|------------|--------------|---------------|----------|
-| Redpanda  | 1          | 500/s       | 500/s      | 2,550        | 0             | Yes      |
-| Redpanda  | 2          | 500/s       | 500/s      | 100          | 0             | Yes      |
-| Redpanda  | 4          | 500/s       | 500/s      | 202          | 0             | Yes      |
-| EventHub  | 1          | 500/s       | 500/s      | 2,550        | 0             | Yes      |
-| EventHub  | 2          | 500/s       | 500/s      | 107          | 0             | Yes      |
-| EventHub  | 4          | 500/s       | 500/s      | 156          | 0             | Yes      |
+| Redpanda  | 1          | 1,000/s     | 1,000/s    | 5,100        | 0             | Yes      |
+| Redpanda  | 2          | 1,000/s     | 1,000/s    | 180          | 0             | Yes      |
+| Redpanda  | 4          | 1,000/s     | 1,000/s    | 140          | 0             | Yes      |
+| EventHub  | 1          | 1,000/s     | 624/s      | 119,310      | 112,800       | No       |
+| EventHub  | 2          | 1,000/s     | —          | —            | —             | —        |
+| EventHub  | 4          | 1,000/s     | —          | —            | —             | —        |
 
 ### Observations
 
-- **All combinations kept up at 500 msg/sec** — final pending count was 0 across the board.
-- **With 4P throughput now at 4,316/s**, the sustained target of 500/s has **8.6x headroom** (up from 3.5x before the optimization).
+- **All Redpanda combinations kept up at 1,000 msg/sec** (doubled from previous 500/s target) — final pending count was 0.
+- **With 4P throughput now at 10,088/s**, the sustained target of 1,000/s has **10x headroom**.
+- **EventHub emulator caps at ~624/s** — this is the transport bottleneck, not the DB. The 1,000/s target is beyond the emulator's capacity.
 
 ---
 
-## What Changed: Precomputed PartitionId
+## What Changed
 
-The FetchBatch query was the dominant bottleneck. Two changes were made:
+### Phase 1: Precomputed PartitionId (128 partitions)
 
-### 1. Persisted computed column
+The FetchBatch query was the dominant bottleneck. Three changes were made:
 
-```sql
-PartitionId AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 128) PERSISTED
-```
+1. **Persisted computed column** — partition hash computed once at INSERT time
+2. **Index keyed on PartitionId** — `IX_Outbox_Pending (PartitionId, EventDateTimeUtc, EventOrdinal)` with covering INCLUDE
+3. **Query rewrite** — `WHERE PartitionId IN (subquery)` replaces INNER JOIN with per-row CHECKSUM
 
-The partition hash is now computed once at INSERT time, not on every SELECT. This eliminates per-row CHECKSUM computation during FetchBatch.
+### Phase 2: 64 partitions + index-aligned ORDER BY
 
-### 2. Index keyed on PartitionId
+Two further optimizations:
 
-```sql
--- Before (never used for FetchBatch — full table scan)
-CREATE INDEX IX_Outbox_Pending ON dbo.Outbox (EventDateTimeUtc, EventOrdinal) INCLUDE (...);
-
--- After (Index Seek by PartitionId)
-CREATE INDEX IX_Outbox_Pending ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal) INCLUDE (..., RowVersion);
-```
-
-### 3. Query rewrite
-
-```sql
--- Before: INNER JOIN with per-row CHECKSUM → Clustered Index Scan (full table)
--- After: WHERE PartitionId IN (subquery) → Index Seek per owned partition
-```
+1. **Reduced partition count from 128 to 64** — matches PostgreSQL; halves the IN-list size for the partition subquery, reduces empty-partition probes for small deployments, and lowers rebalance churn.
+2. **Aligned ORDER BY with index** — changed `ORDER BY EventDateTimeUtc, EventOrdinal` to `ORDER BY PartitionId, EventDateTimeUtc, EventOrdinal`. This matches the `IX_Outbox_Pending` key order exactly, eliminating the Sort operator from the execution plan. SQL Server now streams rows in index order with zero sorting overhead.
 
 ### Execution plan comparison
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Plan | Clustered Index Scan | Index Seek (by PartitionId) |
-| SQL Server missing index suggestions | 1 (71.68% impact) | 0 |
-| Poll p50 (1P) | 140ms | 75ms |
-| Poll p50 (4P) | 115ms | 36ms |
+| Metric | Phase 0 (no index) | Phase 1 (128p) | Phase 2 (64p, aligned) |
+|--------|---------------------|-----------------|------------------------|
+| Plan | Clustered Index Scan | Index Scan + Sort | Ordered Index Scan (no Sort) |
+| Missing index suggestions | 1 (71.68% impact) | 0 | 0 |
+| Poll p50 (1P) | 140ms | 75ms | 30ms |
+| Poll p50 (4P) | 115ms | 36ms | 26ms |
+| Throughput (4P) | 1,758/s | 4,316/s | 10,088/s |
 
 ### Trade-off
 
-The partition count (128) is baked into the computed column formula. Changing it requires stopping all publishers, `ALTER TABLE`, index rebuild, and partition reseed. See `docs/production-runbook.md` for the procedure. PostgreSQL partition count changes are simpler (data-only) but still require stopping publishers to prevent ordering corruption.
+The partition count (64) is baked into the computed column formula. Changing it requires stopping all publishers, `ALTER TABLE`, index rebuild, and partition reseed. See `docs/production-runbook.md` for the procedure. PostgreSQL partition count changes are simpler (data-only) but still require stopping publishers to prevent ordering corruption.
