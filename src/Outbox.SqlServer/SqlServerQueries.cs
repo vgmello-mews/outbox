@@ -73,12 +73,14 @@ internal sealed class SqlServerQueries
                          o.EventDateTimeUtc, o.EventOrdinal,
                          o.RetryCount, o.CreatedAtUtc
                      FROM {outboxTable} o
-                     INNER JOIN {partitionsTable} op
-                         ON  op.OutboxTableName = @OutboxTableName
-                         AND op.OwnerPublisherId = @PublisherId
-                         AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-                         AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
-                     WHERE o.RetryCount < @MaxRetryCount
+                     WHERE o.PartitionId IN (
+                         SELECT op.PartitionId
+                         FROM {partitionsTable} op
+                         WHERE op.OutboxTableName = @OutboxTableName
+                           AND op.OwnerPublisherId = @PublisherId
+                           AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+                     )
+                       AND o.RetryCount < @MaxRetryCount
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
                      ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
                      """;
