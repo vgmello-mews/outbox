@@ -72,7 +72,7 @@ internal sealed class SqlServerQueries
                          o.Headers, o.Payload, o.PayloadContentType,
                          o.EventDateTimeUtc, o.EventOrdinal,
                          o.RetryCount, o.CreatedAtUtc
-                     FROM {outboxTable} o
+                     FROM {outboxTable} o WITH (NOLOCK)
                      WHERE o.PartitionId IN (
                          SELECT op.PartitionId
                          FROM {partitionsTable} op
