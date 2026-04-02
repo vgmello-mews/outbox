@@ -124,13 +124,15 @@ The `@TotalPartitions` parameter is no longer needed in FetchBatch. It's still u
 
 DeletePublished, IncrementRetryCount, DeadLetter, Heartbeat, Rebalance, OrphanSweep, SweepDeadLetters — all remain unchanged. They either operate by SequenceNumber (PK seek) or on the OutboxPartitions table directly.
 
-## PostgreSQL — No Changes
+## PostgreSQL — No Query Changes
 
 PostgreSQL keeps its current design:
 - Hash computed at query time: `(hashtext(partition_key) & 2147483647) % @total_partitions`
 - Partition count is dynamic — determined by rows in `outbox_partitions`
-- Changing partition count is a data-only operation (INSERT/DELETE rows, no schema change, no downtime)
+- Changing partition count is a data-only operation (INSERT/DELETE rows, no schema change)
 - Poll latency is already 3-5ms
+
+**CRITICAL: Changing the PostgreSQL partition count still requires stopping all publishers.** Although the schema change is simpler (no ALTER TABLE), the ordering risk is identical. When `@total_partitions` changes, the same `partition_key` maps to a different `partition_id`. A publisher with in-flight messages for a key that now hashes to a different partition will overlap with the new partition owner, corrupting per-key ordering. See the Partition Count Asymmetry section and runbook below.
 
 ## Partition Count Asymmetry
 
@@ -139,8 +141,11 @@ PostgreSQL keeps its current design:
 | Default partition count | 128 | 64 |
 | Partition hash | Precomputed at INSERT, persisted column | Computed at query time |
 | Index strategy | Seek by PartitionId (leading key) | Scan with runtime hash |
-| Change partition count | ALTER TABLE + index rebuild + reseed (downtime required) | INSERT/DELETE rows in outbox_partitions (no downtime) |
-| Max concurrent publishers | 128 (1 per partition) | Configurable at runtime |
+| Schema change to resize | ALTER TABLE + index rebuild + reseed | INSERT/DELETE rows in outbox_partitions |
+| **Requires stopping publishers** | **Yes** | **Yes** |
+| Max concurrent publishers | 128 (1 per partition) | 64 (1 per partition, expandable) |
+
+**Both stores require stopping all publishers before changing partition count.** The schema change is simpler on PostgreSQL (data-only vs ALTER TABLE), but the ordering safety constraint is identical: changing the hash modulus while publishers are running corrupts per-key ordering.
 
 ## Application Code
 
@@ -191,24 +196,60 @@ SELECT 'Outbox', value FROM GENERATE_SERIES(0, <NEW_COUNT> - 1);
 -- 6. Start publishers — rebalance will distribute the new partition set
 ```
 
-### Ordering safety
+## Runbook: Changing PostgreSQL Partition Count
 
-If the outbox is not empty when changing partition count, existing messages will be re-hashed to potentially different partitions. This is safe because:
+### Prerequisites
 
-- Partition ownership prevents two publishers from processing the same partition simultaneously
-- `ORDER BY EventDateTimeUtc, EventOrdinal` preserves ordering within each partition
-- Messages may move between partitions, but within any given partition, ordering is preserved
-- The version ceiling filter (`RowVersion < MIN_ACTIVE_ROWVERSION()`) still prevents out-of-order publishing from concurrent transactions
+- **All publishers must be stopped.** Changing partition count while publishers are running corrupts per-key ordering (same partition_key maps to different partition_id, two publishers process the same key simultaneously).
+- Outbox should ideally be drained (empty) to avoid redelivery.
 
-The only risk: if a message was partially processed (fetched but not deleted) before the change, it could be re-assigned to a different partition and processed by a different publisher after restart. At-least-once semantics handle this — consumers must be idempotent.
+### Procedure
+
+```sql
+-- 1. Stop all publishers first!
+
+-- 2. Remove existing partition rows
+DELETE FROM outbox_partitions WHERE outbox_table_name = 'outbox';
+
+-- 3. Seed new partition count
+INSERT INTO outbox_partitions (outbox_table_name, partition_id)
+SELECT 'outbox', gs FROM generate_series(0, <NEW_COUNT> - 1) gs
+ON CONFLICT DO NOTHING;
+
+-- 4. Clean up stale publishers (optional)
+DELETE FROM outbox_publishers;
+
+-- 5. Start publishers — rebalance will distribute the new partition set
+```
+
+No schema changes, no index rebuild. The hash modulus is derived at query time from the partition row count.
+
+## Ordering Safety (Both Stores)
+
+**Changing partition count while publishers are running MUST NEVER happen.** The reason:
+
+1. Publisher A fetches messages for `partition_key = "order-123"` (hashes to partition 5 under old modulus)
+2. Partition count changes — same key now hashes to partition 69 under new modulus
+3. Publisher B owns partition 69, fetches the same messages (still in outbox, not yet deleted by A)
+4. Both publishers send messages for "order-123" simultaneously → **ordering corrupted**
+
+**When publishers are stopped**, the change is safe:
+- No in-flight messages exist
+- On restart, each partition key maps to exactly one partition under the new modulus
+- Partition ownership ensures single-writer per partition
+- `ORDER BY event_datetime_utc, event_ordinal` preserves ordering within each partition
+- Messages that moved between partitions will be processed in order by their new owner
+- If the outbox was not fully drained, some messages may be redelivered (at-least-once handles this — consumers must be idempotent)
 
 ## Files Changed
 
 - `src/Outbox.SqlServer/db_scripts/install.sql` — computed column, new index, 128 partitions
 - `src/Outbox.SqlServer/SqlServerQueries.cs` — FetchBatch query rewrite
 - `src/Outbox.SqlServer/SqlServerOutboxStore.cs` — remove TotalPartitions param from FetchBatch
+- `CLAUDE.md` — ordering invariant added to review checklist (first item, emphasized)
+- `docs/outbox-requirements-invariants.md` — partition count change invariant (both stores)
 - `docs/known-limitations.md` — partition count asymmetry between stores
-- `docs/production-runbook.md` — partition count change procedure for SQL Server
+- `docs/production-runbook.md` — partition count change procedure for both SQL Server and PostgreSQL
 - `docs/sqlserver-eventhub-publisher-reference.md` — updated query and filter table
 - `docs/architecture.md` — note precomputed column
 - `docs/publisher-flow.md` — updated partition hashing section

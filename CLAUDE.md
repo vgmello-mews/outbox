@@ -29,6 +29,7 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 ## Review Checklist
 
 Before approving any change, verify against `docs/outbox-requirements-invariants.md`:
+- [ ] **MESSAGE ORDERING MUST NEVER BE CORRUPTED.** Per-(topic, partitionKey) ordering is the core guarantee. Any change that could cause two publishers to process the same partition key simultaneously, or reorder messages within a partition key, is a critical bug. This includes: changing partition counts while publishers are running, changing the hash function, modifying FetchBatch ORDER BY, or breaking the single-writer-per-partition invariant.
 - [ ] Retry count only incremented on transport failure (never on delete failure or circuit-open skip)
 - [ ] No per-message lease columns remain (partition ownership is the sole isolation mechanism)
 - [ ] `CancellationToken.None` used for cleanup operations in failure paths

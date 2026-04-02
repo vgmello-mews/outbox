@@ -30,6 +30,14 @@ This document captures the critical invariants, behavioral requirements, and arc
 - Orphan partitions (owner is stale or NULL) MUST eventually be claimed via rebalance or orphan sweep.
 - `FetchBatchAsync` performs a pure SELECT with no row locking. Isolation is entirely enforced by partition ownership — only the partition owner fetches and processes its messages.
 
+### Partition count changes
+
+- Changing the partition count (the modulus in `hash(partition_key) % total_partitions`) while publishers are running MUST NEVER happen. This applies to **both** SQL Server and PostgreSQL.
+- When the modulus changes, the same `partition_key` maps to a different `partition_id`. This breaks the single-writer guarantee: publisher A may have in-flight messages for a key that now hashes to a partition owned by publisher B. Both publishers process the same partition key simultaneously, corrupting ordering.
+- **SQL Server:** The modulus is baked into a persisted computed column (`PartitionId`). Changing it requires `ALTER TABLE` (inherently requires downtime).
+- **PostgreSQL:** The modulus is computed at query time from `@total_partitions` (= row count of `outbox_partitions`). Adding rows to the partitions table changes the modulus dynamically, which is **equally dangerous**. All publishers MUST be stopped before changing the partition count.
+- **Safe procedure (both stores):** Stop all publishers → drain outbox (or accept redelivery) → change partition count → reseed partition rows → restart publishers. See `docs/production-runbook.md` for detailed steps.
+
 ### Graceful shutdown
 
 - On `StopAsync`, the publisher MUST call `UnregisterPublisherAsync` to release partitions. No lease release is required (there are no leases).
